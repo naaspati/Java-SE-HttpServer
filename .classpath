@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+	<classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+	<classpathentry kind="src" path="src"/>
+	<classpathentry kind="lib" path="C:/Users/Sameer/Documents/MEGA/eclipse_workplace/imports/jddl/jddl.jar" sourcepath="C:/Users/Sameer/Documents/MEGA/eclipse_workplace/imports/jddl/jddl-master.zip"/>
+	<classpathentry kind="output" path="bin"/>
+</classpath>
