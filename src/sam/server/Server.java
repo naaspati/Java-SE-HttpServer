@@ -1,5 +1,14 @@
 package sam.server;
 
+import static sam.server.Tools.bytesToString;
+import static sam.server.Tools.cyan;
+import static sam.server.Tools.durationToString;
+import static sam.server.Tools.green;
+import static sam.server.Tools.red;
+import static sam.server.Tools.resave_cursor;
+import static sam.server.Tools.save_cursor;
+import static sam.server.Tools.yellow;
+
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -34,8 +43,6 @@ import org.kamranzafar.jddl.DownloadTask;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-
-import static sam.server.Tools.*;
 
 public class Server {
     public static void main(String[] args) throws IOException {
@@ -205,6 +212,7 @@ public class Server {
 
     public void start(Path root, boolean openInBrowser) throws IOException {
         closeRoot();
+        
         if (Files.notExists(root))
             throw new FileNotFoundException(root.toString());
 
@@ -219,7 +227,7 @@ public class Server {
             Runtime.getRuntime().exec("explorer http://localhost:" + port);
     }
 
-    public void changeRoot(Path path) throws IOException {
+    public void changeRoot(Path path, boolean openInBrowser) throws IOException {
         if (Files.notExists(path))
             throw new FileNotFoundException(path.toString());
 
@@ -229,9 +237,15 @@ public class Server {
             file = new ZipRoot(path);
         else
             file = new DirectoryRoot(path);
+        
+        if (openInBrowser)
+            Runtime.getRuntime().exec("explorer http://localhost:" + port);
     }
 
     public void closeRoot() throws IOException {
+        if(downloader != null)
+            downloader.cancelAll();
+            
         if (file != null) {
             file.close();
             file = null;
