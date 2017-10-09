@@ -42,6 +42,10 @@ import com.sun.net.httpserver.HttpServer;
 
 public class Server {
     public static void main(String[] args) throws IOException {
+        if(args.length == 1 && args[0].equals("-v")) {
+            System.out.println(1.2);
+            System.exit(0);
+        }
         if (args.length < 1) {
             printUsage();
             System.exit(0);
