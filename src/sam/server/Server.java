@@ -4,6 +4,7 @@ import static sam.server.Tools.bytesToString;
 import static sam.server.Tools.cyan;
 import static sam.server.Tools.durationToString;
 import static sam.server.Tools.green;
+import static sam.server.Tools.pipe;
 import static sam.server.Tools.red;
 import static sam.server.Tools.resave_cursor;
 import static sam.server.Tools.save_cursor;
@@ -26,15 +27,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.time.Duration;
-import java.util.Enumeration;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
-import java.util.zip.ZipOutputStream;
 
 import org.kamranzafar.jddl.DirectDownloader;
 import org.kamranzafar.jddl.DownloadListener;
@@ -50,19 +46,20 @@ public class Server {
             printUsage();
             System.exit(0);
         }
+
         Server s = new Server("localhost", 8080);
         s.start(Paths.get(args[0]), true);//args.length > 1 ? "--open".equals(args[1]) : false);
     }
 
     private static void printUsage() {
         String usage = "" + "usage: java Server [zipfile/folder]"
-        /**
-         * + " [options] \n\n" 
-         * +"options:\n" 
-         * + "--port       Port to use [8080]" 
-         * + "--address    Address to use [localhost]"
-         */
-        ;
+                /**
+                 * + " [options] \n\n" 
+                 * +"options:\n" 
+                 * + "--port       Port to use [8080]" 
+                 * + "--address    Address to use [localhost]"
+                 */
+                 ;
 
         System.out.println(yellow(usage));
     }
@@ -90,10 +87,10 @@ public class Server {
     public Server(String address, int port) throws IOException {
         this.port = port;
 
-        try(InputStream is = ClassLoader.getSystemResourceAsStream("file.ext-mime.tsv");
+        try(InputStream is = getClass().getClassLoader().getResourceAsStream("file.ext-mime.tsv");
                 InputStreamReader reader = new InputStreamReader(is);
                 BufferedReader br = new BufferedReader(reader)) {
-            
+
             fileext_mimeMap = br.lines()
                     .filter(s -> !s.startsWith("#") && s.indexOf('\t') > 0).map(s -> s.split("\t"))
                     .collect(Collectors.toMap(s -> s[2], s -> s[1], (o, n) -> n));
@@ -116,8 +113,8 @@ public class Server {
                     if (dir != null) {
                         StringBuilder sb = new StringBuilder(
                                 "<!DOCTYPE html>\r\n<html>\r\n\r\n<head>\r\n    <meta charset=\"utf-8\">\r\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, shrink-to-fit=no\">\r\n    <title>")
-                                        .append(uri)
-                                        .append("</title>\r\n    <meta name=\"description\" content=\"\">\r\n    <meta name=\"author\" content=\"\">\r\n</head>\r\n<style>\r\n:root {\r\n    background-color: #0F0F0F;\r\n    color: white;\r\n    margin-left: 10px;\r\n    font-family: \"Consolas\";\r\n    line-height: 1.6;\r\n}\r\n\r\nul {\r\n    margin: 0;\r\n    padding: 0;\r\n    margin-left: 10px;\r\n}\r\n\r\nul * {\r\n    margin: 0;\r\n    padding: 0;\r\n}\r\n\r\nli {\r\n    list-style: none;\r\n}\r\n\r\nli a {\r\n    text-decoration: none;\r\n    color: white;\r\n    border: 1px solid #353535;\r\n    border-width: 0 0 1px 0;\r\n    padding-bottom: 1px;\r\nmargin-bottom: 1px;\r\n    transition: border-color 0.5s;\r\n    -webkit-transition: border-color 0.5s;\r\n}\r\n\r\nli a:hover {\r\n    border-color: white;\r\n}\r\n\r\n</style>\r\n\r\n<body>\r\n    <h1>Directory List</h1>\r\n    <ul>");
+                                .append(uri)
+                                .append("</title>\r\n    <meta name=\"description\" content=\"\">\r\n    <meta name=\"author\" content=\"\">\r\n</head>\r\n<style>\r\n:root {\r\n    background-color: #0F0F0F;\r\n    color: white;\r\n    margin-left: 10px;\r\n    font-family: \"Consolas\";\r\n    line-height: 1.6;\r\n}\r\n\r\nul {\r\n    margin: 0;\r\n    padding: 0;\r\n    margin-left: 10px;\r\n}\r\n\r\nul * {\r\n    margin: 0;\r\n    padding: 0;\r\n}\r\n\r\nli {\r\n    list-style: none;\r\n}\r\n\r\nli a {\r\n    text-decoration: none;\r\n    color: white;\r\n    border: 1px solid #353535;\r\n    border-width: 0 0 1px 0;\r\n    padding-bottom: 1px;\r\nmargin-bottom: 1px;\r\n    transition: border-color 0.5s;\r\n    -webkit-transition: border-color 0.5s;\r\n}\r\n\r\nli a:hover {\r\n    border-color: white;\r\n}\r\n\r\n</style>\r\n\r\n<body>\r\n    <h1>Directory List</h1>\r\n    <ul>");
 
                         URI uri2 = uri;
                         dir.forEach(d -> sb.append("<li><a href='")
@@ -142,7 +139,7 @@ public class Server {
                 OutputStream resposeBody = exchange.getResponseBody();
                 exchange.getResponseHeaders().add("Content-Type", getMime(name));
 
-                // replace link which make create CORS error
+                // replace link which may create CORS error // i'm using this to download constant resource(s)
                 if (name.endsWith("js")) {
                     ByteArrayOutputStream bos = new ByteArrayOutputStream(1024);
                     int b = 0;
@@ -161,6 +158,7 @@ public class Server {
                 is.close();
             }
         });
+        
         // handle CORS replacement
         hs.createContext("/download", new HttpHandler() {
             @Override
@@ -192,9 +190,8 @@ public class Server {
             }
         });
     }
-
     private String getMime(String fileName) throws IOException {
-        final int index = fileName.indexOf('.');
+        final int index = fileName.lastIndexOf('.');
         if (index < 0) {
             String mime = Files.probeContentType(Paths.get(fileName));
             return mime == null ? "text/plain" : mime;
@@ -203,16 +200,9 @@ public class Server {
         return mime == null ? "text/plain" : mime;
     }
 
-    private void pipe(InputStream is, OutputStream resposeBody) throws IOException {
-        byte[] bytes = new byte[1024];
-        int n = 0;
-        while ((n = is.read(bytes)) > 0)
-            resposeBody.write(bytes, 0, n);
-    }
-
     public void start(Path root, boolean openInBrowser) throws IOException {
         closeRoot();
-        
+
         if (Files.notExists(root))
             throw new FileNotFoundException(root.toString());
 
@@ -237,15 +227,20 @@ public class Server {
             file = new ZipRoot(path);
         else
             file = new DirectoryRoot(path);
-        
+
         if (openInBrowser)
             Runtime.getRuntime().exec("explorer http://localhost:" + port);
+        
+        System.out.println(green("\nroot changed to:  "+file.getRoot()));
     }
 
     public void closeRoot() throws IOException {
-        if(downloader != null)
+        if(downloader != null) {
             downloader.cancelAll();
-            
+            downloader.shutdown();
+            downloader = null;
+        }
+
         if (file != null) {
             file.close();
             file = null;
@@ -253,25 +248,29 @@ public class Server {
     }
 
     private DirectDownloader downloader;
-    private Thread thread;
 
     protected void downloadAction(URL url, HttpExchange exchange) throws IOException, InterruptedException {
 
         if (downloader == null) {
-            downloader = new DirectDownloader(4);
-            thread = new Thread(downloader);
+            downloader = new DirectDownloader();
+            Thread thread = new Thread(downloader);
             thread.setDaemon(true);
             thread.start();
             thread.join();
         }
-        FileOutputStream fs = new FileOutputStream("temp");
+        
+        Path temp1 = Paths.get("temp", String.valueOf(System.currentTimeMillis()));
+        while(Files.exists(temp1)) temp1 = temp1.resolveSibling(String.valueOf(System.currentTimeMillis()));
+        Files.createDirectories(temp1.getParent());
+        Path temp = temp1;
+        
+        FileOutputStream fs = new FileOutputStream(temp1.toFile());
         downloader.download(new DownloadTask(url, fs, new DownloadListener() {
             double total;
             long last = System.currentTimeMillis();
             int lastTotal = 0;
             int speed = 0;
             String format;
-            String name;
 
             @Override
             public void onUpdate(int bytes, int totalDownloaded) {
@@ -296,7 +295,6 @@ public class Server {
             @Override
             public void onStart(String fname, int fsize) {
                 total = fsize;
-                name = fname;
                 System.out.println(yellow(url));
                 System.out.println(yellow("file-size: ") + (fsize < 0 ? red(" -- ") : bytesToString(fsize)));
                 format = "%s" + cyan(" | ") + (fsize < 0 ? red(" -- ") : green(" %.2f%%")) + cyan(" | ") + "%d Kb/sec"
@@ -312,16 +310,15 @@ public class Server {
                     fs.close();
 
                     Path name = Paths.get(url.getPath()).getFileName();
-                    Path temp = Paths.get("temp");
 
                     if (file instanceof ZipRoot)
-                        repack((ZipRoot) file, name, temp);
+                        ((ZipRoot) file).addFile(temp, name.toString());
                     else {
                         DirectoryRoot dr = (DirectoryRoot) file;
                         Files.copy(temp, dr.root.resolve(name), StandardCopyOption.REPLACE_EXISTING);
                     }
 
-                    exchange.getResponseHeaders().add("Content-Type", getMime(this.name));
+                    exchange.getResponseHeaders().add("Content-Type", getMime(name.toString()));
                     exchange.sendResponseHeaders(200, (long) total);
                     OutputStream resposeBody = exchange.getResponseBody();
 
@@ -333,40 +330,13 @@ public class Server {
 
             @Override
             public void onCancel() {
+                resave_cursor();
                 try {
                     fs.close();
-                    Files.deleteIfExists(Paths.get("temp"));
-                } catch (IOException e) {
-                }
+                    Files.deleteIfExists(temp);
+                } catch (IOException e) {}
+                System.out.println(red("CANCELLED"));
             }
         }));
-    }
-
-    protected void repack(final ZipRoot file, final Path name, final Path src) throws IOException {
-        Path zipfile = file.file;
-
-        if (Files.notExists(zipfile))
-            return;
-
-        file.close();
-
-        Path out = Paths.get(System.currentTimeMillis() + ".zip");
-
-        try (ZipFile zip = new ZipFile(zipfile.toFile());
-                OutputStream os = Files.newOutputStream(out, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                ZipOutputStream zos = new ZipOutputStream(os);) {
-
-            Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry ze = entries.nextElement();
-                zos.putNextEntry(ze);
-                pipe(zip.getInputStream(ze), zos);
-            }
-            zos.putNextEntry(new ZipEntry(name.toString()));
-            Files.copy(src, zos);
-        }
-        Files.move(out, zipfile, StandardCopyOption.REPLACE_EXISTING);
-        System.out.println(yellow("repacked: ") + zipfile.getFileName() + yellow("  added: ") + name);
-        this.file = new ZipRoot(zipfile);
     }
 }

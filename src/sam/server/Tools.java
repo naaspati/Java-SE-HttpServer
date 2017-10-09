@@ -1,9 +1,20 @@
 package sam.server;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.time.Duration;
 
 public final class Tools {
     static boolean NO_COLOR = false; 
+    
+    static void pipe(InputStream is, OutputStream resposeBody) throws IOException {
+        byte[] bytes = new byte[1024];
+        int n = 0;
+        while ((n = is.read(bytes)) > 0)
+            resposeBody.write(bytes, 0, n);
+    }
+    
     static String durationToString(Duration duration) {
         return duration.toString().replace("PT", "").replace("M", "min ").replace("S", "sec ").replace("H", "hr ");
     }
