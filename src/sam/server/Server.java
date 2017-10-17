@@ -1,20 +1,14 @@
 package sam.server;
 
-import static sam.server.Tools.bytesToString;
-import static sam.server.Tools.cyan;
-import static sam.server.Tools.durationToString;
 import static sam.server.Tools.green;
 import static sam.server.Tools.pipe;
 import static sam.server.Tools.red;
-import static sam.server.Tools.resave_cursor;
-import static sam.server.Tools.save_cursor;
 import static sam.server.Tools.yellow;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -23,51 +17,28 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
+import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.time.Duration;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
 import java.util.stream.Collectors;
-
-import org.kamranzafar.jddl.DirectDownloader;
-import org.kamranzafar.jddl.DownloadListener;
-import org.kamranzafar.jddl.DownloadTask;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
+import sam.server.root.DirectoryRoot;
+import sam.server.root.FileUnit;
+import sam.server.root.ServerRoot;
+import sam.server.root.ZipRoot;
+
 public class Server {
-    public static void main(String[] args) throws IOException {
-        if (args.length < 1) {
-            printUsage();
-            System.exit(0);
-        }
-        if(args[0].equals("-v")) {
-            System.out.println(1.2);
-            System.exit(0);
-        }
-        
-        Server s = new Server("localhost", 8080);
-        s.start(Paths.get(args[0]), true);//args.length > 1 ? "--open".equals(args[1]) : false);
-    }
-
-    private static void printUsage() {
-        String usage = "" + "usage: java Server [zipfile/folder]"
-                /**
-                 * + " [options] \n\n" 
-                 * +"options:\n" 
-                 * + "--port       Port to use [8080]" 
-                 * + "--address    Address to use [localhost]"
-                 */
-                 ;
-
-        System.out.println(yellow(usage));
-    }
-
     static final URI ROOT_URI;
 
     static {
@@ -91,6 +62,26 @@ public class Server {
     public Server(String address, int port) throws IOException {
         this.port = port;
 
+        String[] temp = {};
+        boolean tempB = false;
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                closeRoot();
+            } catch (IOException e) {}   
+        }));
+
+        try {
+            Properties rb = new Properties();
+            rb.load(getClass().getClassLoader().getResourceAsStream("server_config.properties"));
+            temp = rb.getProperty("cache.resources", "").replaceAll("\\s+", " ").trim().split(" ");
+            tempB = rb.getProperty("cache.resources.query", "").trim().equalsIgnoreCase("true");
+            Arrays.sort(temp);
+        } catch (Exception e) {}
+
+        final String[] cacheResourceList = temp;
+        final boolean cacheQuery = tempB;
+
         try(InputStream is = getClass().getClassLoader().getResourceAsStream("file.ext-mime.tsv");
                 InputStreamReader reader = new InputStreamReader(is);
                 BufferedReader br = new BufferedReader(reader)) {
@@ -108,10 +99,10 @@ public class Server {
 
                 if (uri.equals(ROOT_URI))
                     uri = ROOT_URI.resolve("index.html");
+                
+                FileUnit fileUnit = file.getFileUnit(uri);
 
-                InputStream is = file.getInputStream(uri);
-
-                if (is == null) {
+                if (fileUnit == null) {
                     uri = exchange.getRequestURI();
                     List<String> dir = file.walkDirectory(uri);
                     if (dir != null) {
@@ -138,15 +129,16 @@ public class Server {
                     }
                     return;
                 }
-                String name = file.getName(uri);
+                String name = fileUnit.getName();
                 System.out.println(uri + yellow(" -> ") + name);
                 OutputStream resposeBody = exchange.getResponseBody();
                 exchange.getResponseHeaders().add("Content-Type", getMime(name));
 
-                // replace link which may create CORS error // i'm using this to download constant resource(s)
-                if (name.endsWith("js")) {
+                // replace link which is is to be cached 
+                if (Arrays.binarySearch(cacheResourceList, name.replaceAll(".+\\.(\\w+)$", "$1")) != -1) {
                     ByteArrayOutputStream bos = new ByteArrayOutputStream(1024);
                     int b = 0;
+                    InputStream is = fileUnit.getInputStream();
                     while ((b = is.read()) > -1)
                         bos.write(b);
 
@@ -155,52 +147,71 @@ public class Server {
                     exchange.sendResponseHeaders(200, bytes.length);
                     resposeBody.write(bytes);
                 } else {
-                    exchange.sendResponseHeaders(200, file.getSize(uri));
-                    pipe(is, resposeBody);
+                    exchange.sendResponseHeaders(200, fileUnit.getSize());
+                    pipe(fileUnit.getInputStream(), resposeBody);
                 }
                 resposeBody.close();
-                is.close();
+                fileUnit.close();
             }
         });
-        
-        // handle CORS replacement
+
+        // handle caching resource 
         hs.createContext("/download", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 URL url = new URL(exchange.getRequestURI().getQuery());
-                InputStream is = null;
-                long size = 0;
-                String name = null;
-                final URI uri = ROOT_URI.resolve(new File(url.getPath()).getName());
-                is = file.getInputStream(uri);
+                final String query = url.getQuery(); 
+                if(query != null && !cacheQuery) {
+                    System.out.println(Tools.cyan("not caching: ")+url);
+                    urlPipe(url, exchange);
+                    return;
+                }
 
-                if (is != null) {
-                    size = file.getSize(uri);
-                    name = file.getName(uri);
-                    exchange.getResponseHeaders().add("Content-Type", getMime(name));
-                    exchange.sendResponseHeaders(200, size);
+                FileUnit fileUnit = query != null ? file.getFileUnit(query.hashCode()) : file.getFileUnit(ROOT_URI.resolve(new File(url.getPath()).getName()));
+
+                if (fileUnit != null) {
+                    exchange.getResponseHeaders().add("Content-Type", getMime(fileUnit.getName()));
+                    exchange.sendResponseHeaders(200, fileUnit.getSize());
                     OutputStream resposeBody = exchange.getResponseBody();
-                    pipe(is, resposeBody);
-                    System.out.println(url + "  " + name);
-                    is.close();
+                    pipe(fileUnit.getInputStream(), resposeBody);
+                    System.out.println(url + yellow(" -> ") + fileUnit.getName());
+                    fileUnit.close();
                     resposeBody.close();
                 } else {
-                    try {
-                        downloadAction(url, exchange);
-                    } catch (InterruptedException e) {
-                        System.out.println("download failed: " + url);
-                    }
+                    downloadAction(query == null ? new File(url.getPath()).getName() : String.valueOf(query.hashCode()), url, exchange);
                 }
             }
         });
     }
-    private String getMime(String fileName) throws IOException {
+    private void urlPipe(URL url, HttpExchange exchange) throws IOException {
+        URLConnection con = url.openConnection();
+        con.setRequestProperty("User-Agent","Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36");
+        con.setConnectTimeout(DownloadThread.CONNECT_TIMEOUT);
+        con.setReadTimeout(DownloadThread.READ_TIMEOUT);
+        con.connect();
+
+        exchange.getResponseHeaders().add("Content-Type", con.getContentType());
+        exchange.sendResponseHeaders(200, con.getContentLength());
+
+        InputStream is = con.getInputStream();
+        OutputStream resposeBody = exchange.getResponseBody();
+        Tools.pipe(is, resposeBody);
+        is.close();
+        resposeBody.close();
+    }
+
+    private String getMime(String fileName) {
         final int index = fileName.lastIndexOf('.');
-        if (index < 0) {
-            String mime = Files.probeContentType(Paths.get(fileName));
-            return mime == null ? "text/plain" : mime;
-        }
+        if (index < 0)
+            return "text/plain";
+
         String mime = fileext_mimeMap.get(fileName.substring(index));
+        if(mime == null) {
+            try {
+                mime = Files.probeContentType(Paths.get(fileName));
+            } catch (IOException e) {}
+        }
+
         return mime == null ? "text/plain" : mime;
     }
 
@@ -234,16 +245,13 @@ public class Server {
 
         if (openInBrowser)
             Runtime.getRuntime().exec("explorer http://localhost:" + port);
-        
+
         System.out.println(green("\nroot changed to:  "+file.getRoot()));
     }
 
     public void closeRoot() throws IOException {
-        if(downloader != null) {
+        if(downloader != null)
             downloader.cancelAll();
-            downloader.shutdown();
-            downloader = null;
-        }
 
         if (file != null) {
             file.close();
@@ -251,96 +259,52 @@ public class Server {
         }
     }
 
-    private DirectDownloader downloader;
+    private DownloadThread downloader;
 
-    protected void downloadAction(URL url, HttpExchange exchange) throws IOException, InterruptedException {
+    protected void downloadAction(String name, URL url, HttpExchange exchange) {
 
         if (downloader == null) {
-            downloader = new DirectDownloader();
+            downloader = new DownloadThread();
             Thread thread = new Thread(downloader);
             thread.setDaemon(true);
             thread.start();
-            thread.join();
         }
-        
-        Path temp1 = Paths.get("temp", String.valueOf(System.currentTimeMillis()));
-        while(Files.exists(temp1)) temp1 = temp1.resolveSibling(String.valueOf(System.currentTimeMillis()));
-        Files.createDirectories(temp1.getParent());
-        Path temp = temp1;
-        
-        FileOutputStream fs = new FileOutputStream(temp1.toFile());
-        downloader.download(new DownloadTask(url, fs, new DownloadListener() {
-            double total;
-            long last = System.currentTimeMillis();
-            int lastTotal = 0;
-            int speed = 0;
-            String format;
+
+        downloader.download(new DownloadTask(url, exchange) {
 
             @Override
-            public void onUpdate(int bytes, int totalDownloaded) {
-                long timepassed = System.currentTimeMillis() - last;
-                if (timepassed >= 1000) {
-                    double downloaded = totalDownloaded - lastTotal;
-                    speed = (int) ((downloaded / timepassed) * (1000d / 1024d));
-                    lastTotal = totalDownloaded;
-                    last = System.currentTimeMillis();
-
-                    resave_cursor();
-
-                    if (total < 0)
-                        System.out.printf(format, bytesToString(totalDownloaded), speed);
-                    else
-                        System.out.printf(format, bytesToString(totalDownloaded), (totalDownloaded * 100d) / total,
-                                speed, durationToString(
-                                        Duration.ofSeconds((long) (((total - totalDownloaded) / 1024) / speed))));
-                }
-            }
-
-            @Override
-            public void onStart(String fname, int fsize) {
-                total = fsize;
-                System.out.println(yellow(url));
-                System.out.println(yellow("file-size: ") + (fsize < 0 ? red(" -- ") : bytesToString(fsize)));
-                format = "%s" + cyan(" | ") + (fsize < 0 ? red(" -- ") : green(" %.2f%%")) + cyan(" | ") + "%d Kb/sec"
-                        + (fsize < 0 ? "" : cyan(" | ") + yellow("time-left: ") + " %s");
-                save_cursor();
-            }
-
-            @Override
-            public void onComplete() {
-                resave_cursor();
+            public void onComplete(Path path, String contentType) {
+                String name2 = name;
                 try {
-                    fs.flush();
-                    fs.close();
-
-                    Path name = Paths.get(url.getPath()).getFileName();
+                    String[] ext = {null};
+                    if(name.matches("-?\\d+") ) {
+                        String mime = contentType == null ? null : contentType.indexOf(';') > 0 ? contentType.substring(0, contentType.indexOf(';')) : contentType;
+                        if(mime != null) {
+                            fileext_mimeMap.forEach((ext2, mime2) -> {
+                                if(ext[0] == null && Objects.equals(mime, mime2)) {
+                                    ext[0] = ext2;
+                                }
+                            });
+                            name2 = name + (ext[0] == null ? "" : ext[0]);
+                        }
+                    }
+                    System.out.println(url + yellow(" ->> ") + name2);
 
                     if (file instanceof ZipRoot)
-                        ((ZipRoot) file).addFile(temp, name.toString());
+                        ((ZipRoot) file).addRepackFile(path, name2);
                     else {
                         DirectoryRoot dr = (DirectoryRoot) file;
-                        Files.copy(temp, dr.root.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+                        Files.copy(path, dr.root.resolve(name2), StandardCopyOption.REPLACE_EXISTING);
                     }
-
-                    exchange.getResponseHeaders().add("Content-Type", getMime(name.toString()));
-                    exchange.sendResponseHeaders(200, (long) total);
-                    OutputStream resposeBody = exchange.getResponseBody();
-
-                    Files.copy(temp, resposeBody);
-                    resposeBody.close();
-                } catch (IOException e) {
-                }
+                } catch (IOException e) {}
             }
 
             @Override
-            public void onCancel() {
-                resave_cursor();
-                try {
-                    fs.close();
-                    Files.deleteIfExists(temp);
-                } catch (IOException e) {}
-                System.out.println(red("CANCELLED"));
+            public void onFailed(Exception e) {
+                e.printStackTrace();
+                System.out.println(url + red(" -> ") + name+"  "+red(e));
             }
-        }));
+
+        });
     }
 }

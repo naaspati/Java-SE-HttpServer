@@ -1,7 +1,6 @@
-package sam.server;
+package sam.server.root;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.file.Files;
@@ -12,7 +11,7 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Optional;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
@@ -20,12 +19,12 @@ import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
+import sam.server.Tools;
+
 public final class ZipRoot implements ServerRoot {
-    private final ZipFile zipFile;
-    private final Path file;
-    private final Map<String, ZipEntry> map;
-    private URI currentUri;
-    private ZipEntry currentZipentry;
+    private ZipFile zipFile;
+    private Path file;
+    private Map<String, ZipEntry> map;
     private HashMap<String, Path> repackMap; 
 
     public ZipRoot(Path root) throws ZipException, IOException {
@@ -36,37 +35,58 @@ public final class ZipRoot implements ServerRoot {
                 .collect(Collectors.toMap(z -> z.getName().replace('\\', '/'), z -> z));    
     }
     private ZipEntry zipEntry(URI uri) {
-        if(Objects.equals(currentUri, uri))
-            return currentZipentry;
-
         ZipEntry ze = map.get(toPath(uri));
         if(ze == null)
             return null;
-
-        currentUri = uri;
-        currentZipentry = ze;
 
         return ze;
     }
 
     @Override
-    public InputStream getInputStream(URI uri) throws IOException {
-        return zipEntry(uri) == null || currentZipentry.isDirectory() ? null :  zipFile.getInputStream(currentZipentry);
+    public FileUnit getFileUnit(URI uri) throws IOException {
+        ZipEntry ze = zipEntry(uri); 
+        return  ze == null ? null : new FileUnit(ze.getName(), ze.getSize(), zipFile.getInputStream(ze));
     }
     @Override
-    public long getSize(URI uri) throws IOException{
-        return zipEntry(uri) == null ? -1 :  currentZipentry.getSize();
+    public FileUnit getFileUnit(long hashcode) throws IOException {
+        String hashcodeS = String.valueOf(hashcode);
+        Optional<String> path = 
+                map.keySet().stream()
+                .filter(s -> s.startsWith(hashcodeS))
+                .filter(s -> hashcodeS.equals(s.indexOf('.') < 0 ? s : s.substring(0, s.indexOf('.'))))
+                .filter(f -> !map.get(f).isDirectory())
+                .findFirst();
+        
+        if(path.isPresent()) {
+            ZipEntry ze = map.get(path.get());
+            return new FileUnit(ze.getName(), ze.getSize(), zipFile.getInputStream(ze));
+        }
+        
+        if(repackMap != null) {
+            Optional<String> value = repackMap.keySet().stream()
+            .filter(s -> s.startsWith(hashcodeS))
+            .filter(s -> hashcodeS.equals(s.indexOf('.') < 0 ? s : s.substring(0, s.indexOf('.'))))
+            .findFirst();
+            
+            if(value.isPresent()) {
+                Path p = repackMap.get(value.get());
+                return new FileUnit(p.getFileName().toString(), Files.size(p), Files.newInputStream(p, StandardOpenOption.READ));
+            }
+        }
+        return null;
     }
-    @Override
-    public String getName(URI uri) {
-        return zipEntry(uri) == null ? null :  currentZipentry.getName();
-    }
+    
+    
     @Override
     public void close() throws IOException {
         repack();
-        currentZipentry = null;
-        currentUri = null;
-        zipFile.close();
+        file = null;
+        map = null;
+        repackMap = null;
+        if(zipFile != null) {
+            zipFile.close();
+        }
+        zipFile = null;
     }
 
     @Override
@@ -77,15 +97,15 @@ public final class ZipRoot implements ServerRoot {
     @Override
     public List<String> walkDirectory(final URI uri) {
         Stream<String> strm = map.keySet().stream();
-        
+
         String str = uri.getPath().substring(1);
-        
+
         if(!str.isEmpty()) {
             strm = strm
-            .filter(s -> s.startsWith(str))
-            .map(s -> s.substring(str.length()+1));
+                    .filter(s -> s.startsWith(str))
+                    .map(s -> s.substring(str.length()+1));
         }
-        
+
         return strm 
                 .map(s -> {
                     int index = s.indexOf('/');
@@ -96,15 +116,15 @@ public final class ZipRoot implements ServerRoot {
                 .distinct()
                 .collect(Collectors.toList());
     }
-    
-    public void addFile(Path file, String name) {
+
+    public void addRepackFile(Path file, String name) {
         if(repackMap == null)
             repackMap = new HashMap<>();
-        
+
         repackMap.put(name, file);
     }
     private void repack() throws IOException {
-        if (repackMap == null || Files.notExists(file))
+        if (repackMap == null || repackMap.isEmpty() || Files.notExists(file))
             return;
 
         Path out = Files.createTempFile("__", ".zip");
@@ -128,10 +148,12 @@ public final class ZipRoot implements ServerRoot {
             });
         }
         zipFile.close();
+        zipFile = null;
+
         Files.move(out, file, StandardCopyOption.REPLACE_EXISTING);
         System.out.println(Tools.yellow("repacked: ") + file.getFileName() + Tools.yellow("  added: ") + repackMap.keySet());
     }
-    
+
 }
 
 
