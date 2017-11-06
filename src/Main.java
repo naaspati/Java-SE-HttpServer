@@ -8,11 +8,11 @@ import sam.server.Tools;
 public class Main {
     public static void main(String[] args) throws IOException {
         // args = new String[] {"C:\\Users\\Sameer\\Documents\\MEGA\\programming_backup\\web_desk"};
-
+        
         if(args.length == 0)
             args = new String[] {"."};
         
-        if (args.length < 1) {
+        if (args[0].equals("-h")) {
             printUsage();
             System.exit(0);
         }

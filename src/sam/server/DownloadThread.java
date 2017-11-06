@@ -17,7 +17,8 @@ import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Properties;
+import java.util.HashMap;
+import java.util.ResourceBundle;
 import java.util.concurrent.LinkedBlockingQueue;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -26,18 +27,13 @@ public class DownloadThread implements Runnable {
 
     public static final int READ_TIMEOUT, CONNECT_TIMEOUT;
     static {
-        int rt = 0, ct = 0;
-        try {
-            Properties rb = new Properties();
-            rb.load(DownloadThread.class.getClassLoader().getResourceAsStream("server_config.properties"));
-            rt = Integer.parseInt(rb.getProperty("read.timeout", "10000"));
-            ct = Integer.parseInt(rb.getProperty("connect.timeout", "2000"));
-        } catch (Exception e) {}
-        READ_TIMEOUT = rt;
-        CONNECT_TIMEOUT = ct;
+        ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
+        READ_TIMEOUT = Integer.parseInt(rb.getString("read.timeout"));
+        CONNECT_TIMEOUT = Integer.parseInt(rb.getString("connect.timeout"));
     }
 
     private final LinkedBlockingQueue<DownloadTask> tasks = new LinkedBlockingQueue<>();
+    private static final HashMap<URL, Downloaded> downloaded = new HashMap<>();
 
     private boolean cancel;
     private boolean kill;
@@ -72,18 +68,33 @@ public class DownloadThread implements Runnable {
             try {
                 reset();
                 
+                Downloaded dl = downloaded.get(task.url);
+                if(dl != null) {
+                    task.start((int) Files.size(temp = dl.path), contentType = dl.mime);
+                    InputStream is = Files.newInputStream(temp);
+                    int n = 0;
+                    while((n = is.read(buffer)) > 0) {
+                        if(cancel || kill)
+                            break;
+                        task.write(buffer, 0, n);
+                    }
+                    is.close();
+                    onComplete();
+                    return;
+                }
+                
                 System.out.println(yellow("downloading: ")+task.url);
 
                 URLConnection con = task.url.openConnection();
-                con.setRequestProperty("User-Agent","Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36");
+                con.setRequestProperty("User-Agent","Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36");
                 con.setConnectTimeout(CONNECT_TIMEOUT);
                 con.setReadTimeout(READ_TIMEOUT);
-                con.connect();
                 
                 save_cursor();
                 onStart(con.getContentLength(), con.getContentType());
 
                 temp = Files.createTempFile("server", "");
+                Server.addTempFile(temp);
                 fs = new FileOutputStream(temp.toFile());
 
                 int bytesRead = 0;
@@ -144,8 +155,7 @@ public class DownloadThread implements Runnable {
 
     private void onStart(int fsize, String contentType) throws IOException {
         total = fsize;
-        System.out.println(yellow("file-size: ") + (fsize < 0 ? red(" -- ") : bytesToString(fsize)));
-        format = "%s" + cyan(" | ") + (fsize < 0 ? red(" -- ") : green(" %.2f%%")) + cyan(" | ") + "%d Kb/sec"
+        format = "%s / "+green(bytesToString(fsize)) + cyan(" | ") + (fsize < 0 ? red(" -- ") : yellow(" %.2f%%")) + cyan(" | ") + "%d Kb/sec"
                 + (fsize < 0 ? "" : cyan(" | ") + yellow("time-left: ") + " %s");
 
         this.contentType = contentType;
@@ -155,10 +165,15 @@ public class DownloadThread implements Runnable {
     private void onComplete() {
         resave_cursor();
         try {
-            fs.flush();
-            fs.close();
+            if(fs != null) {
+                fs.flush();
+                fs.close();
+            }
             task.close();
             task.onComplete(temp, contentType);
+            
+            if(!downloaded.containsKey(task.url))
+                downloaded.put(task.url, new Downloaded(temp, contentType));
         } catch (IOException e) {
             task.onFailed(e);
         }
@@ -206,6 +221,16 @@ public class DownloadThread implements Runnable {
         unsave_cursor();
         erase_down();
         save_cursor();
+    }
+    
+    private class Downloaded {
+        final Path path;
+        final String mime;
+        
+        public Downloaded(Path path, String mime) {
+            this.path = path;
+            this.mime = mime;
+        }
     }
 }
 abstract class DownloadTask implements Closeable, AutoCloseable {
