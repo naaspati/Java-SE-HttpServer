@@ -23,7 +23,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -194,11 +193,10 @@ public class Server {
                         downloadAction(name, url, exchange, Stream.of(downloadResources).anyMatch(s -> u.matches(s)));
                     }
                     else {
-                        try(OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name));
-                                InputStream is = Files.newInputStream(path, StandardOpenOption.READ);
-                                ) {
-                            pipe(is, resposeBody);    
-                        }
+                        OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name));
+                        Files.copy(path, resposeBody);
+                        resposeBody.close();
+                        
                         System.out.println(url +cyan(" -> ")+path.subpath(path.getNameCount() - 2, path.getNameCount()));
                     }
                 }

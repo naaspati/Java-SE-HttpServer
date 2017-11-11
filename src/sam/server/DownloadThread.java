@@ -67,7 +67,7 @@ public class DownloadThread implements Runnable {
             }
             try {
                 reset();
-                
+
                 Downloaded dl = downloaded.get(task.url);
                 if(dl != null) {
                     task.start((int) Files.size(temp = dl.path), contentType = dl.mime);
@@ -82,14 +82,16 @@ public class DownloadThread implements Runnable {
                     onComplete();
                     return;
                 }
-                
+
                 System.out.println(yellow("downloading: ")+task.url);
 
                 URLConnection con = task.url.openConnection();
-                con.setRequestProperty("User-Agent","Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/53.0.2785.143 Safari/537.36");
                 con.setConnectTimeout(CONNECT_TIMEOUT);
                 con.setReadTimeout(READ_TIMEOUT);
-                
+                con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.89 Safari/537.36");
+                // setRequestHeader(con, null, null);
+                con.connect();
+
                 save_cursor();
                 onStart(con.getContentLength(), con.getContentType());
 
@@ -118,6 +120,20 @@ public class DownloadThread implements Runnable {
                     break;
             }
         }
+    }
+    private static void setRequestHeader(URLConnection con, String host, String referer) {
+        con.setRequestProperty("Accept","text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+        con.setRequestProperty("Accept-Encoding", "gzip, deflate, br");
+        con.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+        con.setRequestProperty("Cache-Control", "max-age=0");
+        con.setRequestProperty("Connection", "keep-alive");
+        con.setRequestProperty("DNT", "1");
+        if(host != null)
+            con.setRequestProperty("Host", host);
+        if(referer != null)
+            con.setRequestProperty("Referer", referer);
+        con.setRequestProperty("Upgrade-Insecure-Requests", "1");
+        con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.89 Safari/537.36");
     }
     private void reset() throws IOException {
         total = 0;
@@ -171,7 +187,7 @@ public class DownloadThread implements Runnable {
             }
             task.close();
             task.onComplete(temp, contentType);
-            
+
             if(!downloaded.containsKey(task.url))
                 downloaded.put(task.url, new Downloaded(temp, contentType));
         } catch (IOException e) {
@@ -222,11 +238,11 @@ public class DownloadThread implements Runnable {
         erase_down();
         save_cursor();
     }
-    
+
     private class Downloaded {
         final Path path;
         final String mime;
-        
+
         public Downloaded(Path path, String mime) {
             this.path = path;
             this.mime = mime;
