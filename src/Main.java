@@ -7,6 +7,7 @@ import sam.server.Tools;
 
 public class Main {
     public static void main(String[] args) throws IOException {
+        args = new String[] {"D:\\Downloads\\scrapper\\procedural-newton-s-cradle_1507215441043"};
         if(args.length == 0)
             args = new String[] {"."};
         

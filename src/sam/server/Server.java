@@ -1,6 +1,5 @@
 package sam.server;
 
-import static sam.server.Tools.cyan;
 import static sam.server.Tools.green;
 import static sam.server.Tools.pipe;
 import static sam.server.Tools.red;
@@ -18,18 +17,22 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
-import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -68,7 +71,7 @@ public class Server {
     private final HttpServer hs;
     private final Map<String, String> fileext_mimeMap;
     private final int port;
-    private static final Set<Path> TEMP_FILES = new HashSet<>(); 
+    private static final Set<Path> TEMP_FILES = new HashSet<>();
 
     static void addTempFile(Path temp) {
         TEMP_FILES.add(temp);
@@ -80,19 +83,18 @@ public class Server {
     public Server(String address, int port) throws IOException {
         this.port = port;
 
+        ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
+
+        final Predicate<String> download_as_server_resources = createPredicate(rb, "download.as.server.resources");
+        final Predicate<String> download_resources = createPredicate(rb, "download.resources");
+        ResourceBundle.clearCache();
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
                 closeRoot();
                 TEMP_FILES.stream().map(Path::toFile).forEach(File::delete);
             } catch (IOException e) {}   
         }));
-        
-        ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
-
-        final String[] cacheResourceList = rb.getString("cache.resources").replaceAll("\\s+", " ").trim().split(" ");
-        final String[] downloadResources = rb.getString("download.resources").replaceAll("\\s+", " ").trim().split(" ");
-        final boolean cacheQuery = rb.getString("cache.resources.query").trim().equalsIgnoreCase("true");
-        Arrays.sort(cacheResourceList);
 
         try(InputStream is = getClass().getClassLoader().getResourceAsStream("1509617391333-file.ext-mime.tsv");
                 InputStreamReader reader = new InputStreamReader(is);
@@ -116,44 +118,43 @@ public class Server {
 
                 if (fileUnit == null) {
                     uri = exchange.getRequestURI();
+
                     List<String> dir = file.walkDirectory(uri);
                     if (dir != null) {
-                        StringBuilder sb = new StringBuilder(
-                                "<!DOCTYPE html>\r\n<html>\r\n\r\n<head>\r\n    <meta charset=\"utf-8\">\r\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, shrink-to-fit=no\">\r\n    <title>")
-                                .append(uri)
-                                .append("</title>\r\n    <meta name=\"description\" content=\"\">\r\n    <meta name=\"author\" content=\"\">\r\n</head>\r\n<style>\r\n:root {\r\n    background-color: #0F0F0F;\r\n    color: white;\r\n    margin-left: 10px;\r\n    font-family: \"Consolas\";\r\n    line-height: 1.6;\r\n}\r\n\r\nul {\r\n    margin: 0;\r\n    padding: 0;\r\n    margin-left: 10px;\r\n}\r\n\r\nul * {\r\n    margin: 0;\r\n    padding: 0;\r\n}\r\n\r\nli {\r\n    list-style: none;\r\n}\r\n\r\nli a {\r\n    text-decoration: none;\r\n    color: white;\r\n    border: 1px solid #353535;\r\n    border-width: 0 0 1px 0;\r\n    padding-bottom: 1px;\r\nmargin-bottom: 1px;\r\n    transition: border-color 0.5s;\r\n    -webkit-transition: border-color 0.5s;\r\n}\r\n\r\nli a:hover {\r\n    border-color: white;\r\n}\r\n\r\n</style>\r\n\r\n<body>\r\n    <h1>Directory List</h1>\r\n    <ul>");
-
-                        URI uri2 = uri;
-                        dir.forEach(d -> sb.append("<li><a href='")
-                                .append(uri2 + (ROOT_URI.equals(uri2) ? "" : "/")
-                                        + Paths.get("/" + d).toUri().toString().replaceFirst("^file:\\/+\\w+:\\/", ""))
-                                .append("'>").append(d).append("</a></li>\n"));
-                        sb.append("   </ul>\r\n</body>\r\n\r\n</html>\r\n");
-                        final byte[] bytes = sb.toString().getBytes();
+                        final byte[] bytes = directoryHtml(uri, dir);
                         OutputStream resposeBody = setSendHeader(exchange, bytes.length, "text/html");
                         resposeBody.write(bytes);
                         resposeBody.close();
                     } else {
-                        System.out.println(uri + red("  ->  null"));
+                        print(uri, null);
                         exchange.sendResponseHeaders(404, -1);
                     }
                     return;
                 }
                 String name = fileUnit.getName();
-                System.out.println(uri + yellow(" -> ") + name);
+                print(uri,name);
                 OutputStream resposeBody = exchange.getResponseBody();
                 exchange.getResponseHeaders().add("Content-Type", getMime(name));
 
-                // replace link which is is to be cached 
-                if (Arrays.binarySearch(cacheResourceList, name.replaceAll(".+\\.(\\w+)$", "$1")) != -1) {
-                    ByteArrayOutputStream bos = new ByteArrayOutputStream(1024);
-                    int b = 0;
+                // replace link which is to be cached 
+                if (uri.equals(ROOT_URI.resolve("index.html")) || uri.toString().chars().filter(c -> c == '/').count() >= 2) {
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream((int)fileUnit.getSize());
                     InputStream is = fileUnit.getInputStream();
-                    while ((b = is.read()) > -1)
-                        bos.write(b);
+                    int b = 0;
+                    while((b = is.read()) != -1) bos.write(b);
 
-                    String str = new String(bos.toByteArray()).replaceAll("([\"'])(https?://)", "$1/download?$2");
-                    byte[] bytes = str.getBytes();
+                    Pattern pattern = Pattern.compile("(\"|')(https?.+)\\1");
+                    Matcher m = pattern.matcher(new String(bos.toByteArray()));
+
+                    StringBuffer sb = new StringBuffer();
+
+                    while(m.find()) {
+                        if(download_resources.test(m.group(2)))
+                            m.appendReplacement(sb, m.group(1)+"/download?"+m.group(2)+m.group(1));
+                    } 
+                    m.appendTail(sb);
+
+                    byte[] bytes = sb.toString().getBytes();
                     exchange.sendResponseHeaders(200, bytes.length);
                     resposeBody.write(bytes);
                 } else {
@@ -171,18 +172,13 @@ public class Server {
             public void handle(HttpExchange exchange) throws IOException {
                 URL url = new URL(exchange.getRequestURI().getQuery());
                 final String query = url.getQuery(); 
-                if(query != null && !cacheQuery) {
-                    System.out.println(Tools.cyan("not caching: ")+url);
-                    urlPipe(url, exchange);
-                    return;
-                }
 
                 FileUnit fileUnit = query != null ? file.getFileUnit(query.hashCode()) : file.getFileUnit(ROOT_URI.resolve(new File(url.getPath()).getName()));
 
                 if (fileUnit != null) {
                     OutputStream resposeBody = setSendHeader(exchange, fileUnit.getSize(), getMime(fileUnit.getName()));
                     pipe(fileUnit.getInputStream(), resposeBody);
-                    System.out.println(url + yellow(" -> ") + fileUnit.getName());
+                    print(url, fileUnit.getName());
                     fileUnit.close();
                     resposeBody.close();
                 } else {
@@ -190,38 +186,79 @@ public class Server {
                     Path path = DOWNLOADS_DIR.resolve(name);
                     if(Files.notExists(path)) {
                         String u = url.toString();
-                        downloadAction(name, url, exchange, Stream.of(downloadResources).anyMatch(s -> u.matches(s)));
+                        downloadAction(name, url, exchange, download_as_server_resources.test(u));
                     }
                     else {
                         OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name));
                         Files.copy(path, resposeBody);
                         resposeBody.close();
-                        
-                        System.out.println(url +cyan(" -> ")+path.subpath(path.getNameCount() - 2, path.getNameCount()));
+
+                        print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
                     }
                 }
             }
         });
     }
+    private Predicate<String> createPredicate(ResourceBundle rb, String resourceKey) {
+        Map<Boolean, Set<String>> map = 
+                Optional.ofNullable(rb.getString(resourceKey))
+                .map(s -> s.trim().isEmpty() ? null : s)
+                .map(s -> s.split("\\s*,\\s*"))
+                .map(ary -> Stream.of(ary)
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .map(s -> s.replace(".", "\\.").replace("*", ".+"))
+                        .collect(Collectors.partitioningBy(s -> s.charAt(0) != '!', Collectors.toSet()))
+                        )
+                .orElse(new HashMap<>());
+        
+        Function<Boolean , Predicate<String>> get = key -> {
+            if(map.get(key) == null) {
+                return s -> !key; 
+            }
+                
+            return map.get(key)
+            .stream()
+            .map(s -> key ? s : s.substring(1))
+            .map(Pattern::compile)
+            .map(pattern -> (Predicate<String>)(s -> pattern.matcher(s).matches()))
+            .reduce(Predicate::or)
+            .orElse(s -> !key);        
+        };
+        
+        Predicate<String> add = get.apply(true);
+        Predicate<String> remove = get.apply(false);
+        
+        // return remove.negate().and(add)
+        return s -> remove.test(s) ? false : add.test(s);
+    }; 
+    
+    protected byte[] directoryHtml(URI uri, List<String> dir) {
+        StringBuilder sb = new StringBuilder(
+                "<!DOCTYPE html>\r\n<html>\r\n\r\n<head>\r\n    <meta charset=\"utf-8\">\r\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, shrink-to-fit=no\">\r\n    <title>")
+                .append(uri)
+                .append("</title>\r\n    <meta name=\"description\" content=\"\">\r\n    <meta name=\"author\" content=\"\">\r\n</head>\r\n<style>\r\n:root {\r\n    background-color: #0F0F0F;\r\n    color: white;\r\n    margin-left: 10px;\r\n    font-family: \"Consolas\";\r\n    line-height: 1.6;\r\n}\r\n\r\nul {\r\n    margin: 0;\r\n    padding: 0;\r\n    margin-left: 10px;\r\n}\r\n\r\nul * {\r\n    margin: 0;\r\n    padding: 0;\r\n}\r\n\r\nli {\r\n    list-style: none;\r\n}\r\n\r\nli a {\r\n    text-decoration: none;\r\n    color: white;\r\n    border: 1px solid #353535;\r\n    border-width: 0 0 1px 0;\r\n    padding-bottom: 1px;\r\nmargin-bottom: 1px;\r\n    transition: border-color 0.5s;\r\n    -webkit-transition: border-color 0.5s;\r\n}\r\n\r\nli a:hover {\r\n    border-color: white;\r\n}\r\n\r\n</style>\r\n\r\n<body>\r\n    <h1>Directory List</h1>\r\n    <ul>");
+
+        URI uri2 = uri;
+        dir.forEach(d -> sb.append("<li><a href='")
+                .append(uri2 + (ROOT_URI.equals(uri2) ? "" : "/")
+                        + Paths.get("/" + d).toUri().toString().replaceFirst("^file:\\/+\\w+:\\/", ""))
+                .append("'>").append(d).append("</a></li>\n"));
+        sb.append("   </ul>\r\n</body>\r\n\r\n</html>\r\n");
+        return sb.toString().getBytes();
+    }
+    protected void print(Object request, Object response) {
+        System.out.println(request + (response == null ? red("  ->  null") : yellow(" -> ") + response));
+    }
+    protected void error(Object request, Object msg, Exception e) {
+        System.out.println(request + red(" -> ") + msg + red("Error: [")+ e.getClass().getSimpleName()+"] "+e.getMessage());
+    }
+
     private OutputStream setSendHeader(HttpExchange exchange, long size, String mime) throws IOException {
         exchange.getResponseHeaders().add("Content-Type", mime);
         exchange.sendResponseHeaders(200, size);
         return exchange.getResponseBody();
     }
-    private void urlPipe(URL url, HttpExchange exchange) throws IOException {
-        URLConnection con = url.openConnection();
-        con.setRequestProperty("User-Agent","Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36");
-        con.setConnectTimeout(DownloadThread.CONNECT_TIMEOUT);
-        con.setReadTimeout(DownloadThread.READ_TIMEOUT);
-        con.connect();
-
-        InputStream is = con.getInputStream();
-        OutputStream resposeBody = setSendHeader(exchange, con.getContentLength(), con.getContentType());
-        Tools.pipe(is, resposeBody);
-        is.close();
-        resposeBody.close();
-    }
-
     private String getMime(String fileName) {
         final int index = fileName.lastIndexOf('.');
         if (index < 0)
@@ -299,7 +336,7 @@ public class Server {
                 try {
                     if(saveIt) {
                         Files.copy(path, DOWNLOADS_DIR.resolve(name), StandardCopyOption.REPLACE_EXISTING);
-                        System.out.println(url + yellow(" -> ") + "downloaded/"+name);
+                        print(url , "downloaded/"+name);
                         return;
                     }
 
@@ -315,7 +352,7 @@ public class Server {
                             name2 = name + (ext[0] == null ? "" : ext[0]);
                         }
                     }
-                    System.out.println(url + yellow(" ->> ") + name2);
+                    print(url, name2);
 
                     if (file instanceof ZipRoot)
                         ((ZipRoot) file).addRepackFile(path, name2);
@@ -328,8 +365,7 @@ public class Server {
 
             @Override
             public void onFailed(Exception e) {
-                e.printStackTrace();
-                System.out.println(url + red(" -> ") + name+"  "+red(e));
+                error(url , name+"  ", e);
             }
 
         });

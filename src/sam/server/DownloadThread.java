@@ -30,6 +30,7 @@ public class DownloadThread implements Runnable {
         ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
         READ_TIMEOUT = Integer.parseInt(rb.getString("read.timeout"));
         CONNECT_TIMEOUT = Integer.parseInt(rb.getString("connect.timeout"));
+        ResourceBundle.clearCache();
     }
 
     private final LinkedBlockingQueue<DownloadTask> tasks = new LinkedBlockingQueue<>();
