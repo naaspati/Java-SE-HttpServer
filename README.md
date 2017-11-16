@@ -7,4 +7,4 @@ if the root has a index.html, server will send this as root file to browser othe
 java -jar server.jar [zipfile/folder] 
 
 ### download 
-[download](https://github.com/naaspati/Java-SE-HttpServer/raw/master/server.jar "download")
+[download](https://github.com/naaspati/Java-SE-HttpServer/raw/master/compiled/server.jar "download")
