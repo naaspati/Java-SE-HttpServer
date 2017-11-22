@@ -54,12 +54,13 @@ public class Server {
         Path p = null;
         try {
             u = new URI("/");
-            p = Stream.of(System.getProperty("java.class.path").split(";"))
-                    .filter(s -> s.endsWith("/server.jar") || s.endsWith("\\server.jar"))
-                    .findFirst()
+
+            p = Optional.ofNullable(System.getProperty("server"))
                     .map(Paths::get)
-                    .map(pp -> pp.resolveSibling("server_downloads"))
-                    .orElse(Paths.get("server_downloads"));
+                    .map(path -> Files.isRegularFile(path) ? path.getParent() : path)
+                    .orElse(Paths.get("."))
+                    .resolve("server_downloads");
+
             Files.createDirectories(p);
         } catch (URISyntaxException | IOException e) {}
 
@@ -70,8 +71,9 @@ public class Server {
     private ServerRoot file;
     private final HttpServer hs;
     private final Map<String, String> fileext_mimeMap;
-    private final int port;
     private static final Set<Path> TEMP_FILES = new HashSet<>();
+    private final Predicate<String> download_as_server_resources;
+    private final InetSocketAddress runningAt;
 
     static void addTempFile(Path temp) {
         TEMP_FILES.add(temp);
@@ -80,12 +82,11 @@ public class Server {
         return file == null ? null : file.getRoot();
     }
 
-    public Server(String address, int port) throws IOException {
-        this.port = port;
-
+    public Server(int port) throws IOException {
         ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
+        runningAt = new InetSocketAddress("localhost", port);
 
-        final Predicate<String> download_as_server_resources = createPredicate(rb, "download.as.server.resources");
+        download_as_server_resources = createPredicate(rb, "download.as.server.resources");        
         final Predicate<String> download_resources = createPredicate(rb, "download.resources");
         ResourceBundle.clearCache();
 
@@ -105,7 +106,7 @@ public class Server {
                     .collect(Collectors.toMap(s -> s[2], s -> s[1], (o, n) -> n));
         }
 
-        hs = HttpServer.create(new InetSocketAddress(address, port), 10);
+        hs = HttpServer.create(runningAt, 10);
         hs.createContext(ROOT_URI.toString(), new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
@@ -184,10 +185,8 @@ public class Server {
                 } else {
                     String name = query == null ? new File(url.getPath()).getName() : String.valueOf(query.hashCode());
                     Path path = DOWNLOADS_DIR.resolve(name);
-                    if(Files.notExists(path)) {
-                        String u = url.toString();
-                        downloadAction(name, url, exchange, download_as_server_resources.test(u));
-                    }
+                    if(Files.notExists(path))
+                        downloadAction(name, url, exchange);
                     else {
                         OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name));
                         Files.copy(path, resposeBody);
@@ -211,28 +210,25 @@ public class Server {
                         .collect(Collectors.partitioningBy(s -> s.charAt(0) != '!', Collectors.toSet()))
                         )
                 .orElse(new HashMap<>());
-        
+
         Function<Boolean , Predicate<String>> get = key -> {
-            if(map.get(key) == null) {
-                return s -> !key; 
-            }
-                
+            if(map.get(key) == null || map.get(key).isEmpty())
+                return null; 
+
             return map.get(key)
-            .stream()
-            .map(s -> key ? s : s.substring(1))
-            .map(Pattern::compile)
-            .map(pattern -> (Predicate<String>)(s -> pattern.matcher(s).matches()))
-            .reduce(Predicate::or)
-            .orElse(s -> !key);        
+                    .stream()
+                    .map(s -> key ? s : s.substring(1))
+                    .map(Pattern::compile)
+                    .map(pattern -> (Predicate<String>)(s -> pattern.matcher(s).matches()))
+                    .reduce(Predicate::or)
+                    .get();        
         };
-        
+
         Predicate<String> add = get.apply(true);
         Predicate<String> remove = get.apply(false);
-        
-        // return remove.negate().and(add)
-        return s -> remove.test(s) ? false : add.test(s);
+
+        return string -> remove != null && remove.test(string) ? false : add == null ? false : add.test(string);    
     }; 
-    
     protected byte[] directoryHtml(URI uri, List<String> dir) {
         StringBuilder sb = new StringBuilder(
                 "<!DOCTYPE html>\r\n<html>\r\n\r\n<head>\r\n    <meta charset=\"utf-8\">\r\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, shrink-to-fit=no\">\r\n    <title>")
@@ -286,9 +282,11 @@ public class Server {
             file = new DirectoryRoot(root);
 
         hs.start();
-        System.out.println(yellow("server running at: localhost:" + port));
+        System.out.println(yellow("server running at: \n")+
+                "    localhost:"+ runningAt.getPort()+
+                "\n    "+runningAt.getAddress().getHostAddress() + ":"+runningAt.getPort()+"\n");
         if (openInBrowser)
-            Runtime.getRuntime().exec("explorer http://localhost:" + port);
+            Runtime.getRuntime().exec("explorer http://localhost:" + runningAt.getPort());
     }
 
     public void changeRoot(Path path, boolean openInBrowser) throws IOException {
@@ -303,7 +301,7 @@ public class Server {
             file = new DirectoryRoot(path);
 
         if (openInBrowser)
-            Runtime.getRuntime().exec("explorer http://localhost:" + port);
+            Runtime.getRuntime().exec("explorer http://localhost:"+runningAt.getPort());
 
         System.out.println(green("\nroot changed to:  "+file.getRoot()));
     }
@@ -320,7 +318,7 @@ public class Server {
 
     private DownloadThread downloader;
 
-    protected void downloadAction(String name, URL url, HttpExchange exchange, boolean saveIt) {
+    protected void downloadAction(String name, URL url, HttpExchange exchange) {
 
         if (downloader == null) {
             downloader = new DownloadThread();
@@ -334,9 +332,9 @@ public class Server {
             public void onComplete(final Path path, String contentType) {
                 String name2 = name;
                 try {
-                    if(saveIt) {
+                    if(download_as_server_resources.test(url.toString())) {
                         Files.copy(path, DOWNLOADS_DIR.resolve(name), StandardCopyOption.REPLACE_EXISTING);
-                        print(url , "downloaded/"+name);
+                        print(url , yellow("downloaded/"+name));    
                         return;
                     }
 

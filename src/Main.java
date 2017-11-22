@@ -7,7 +7,6 @@ import sam.server.Tools;
 
 public class Main {
     public static void main(String[] args) throws IOException {
-        args = new String[] {"D:\\Downloads\\scrapper\\procedural-newton-s-cradle_1507215441043"};
         if(args.length == 0)
             args = new String[] {"."};
         
@@ -20,7 +19,7 @@ public class Main {
             System.exit(0);
         }
 
-        Server s = new Server("localhost", 8080);
+        Server s = new Server(8080);
         s.start(Paths.get(args[0]), true);//args.length > 1 ? "--open".equals(args[1]) : false);
     }
 

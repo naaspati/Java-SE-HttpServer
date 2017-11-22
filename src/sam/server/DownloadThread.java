@@ -122,8 +122,10 @@ public class DownloadThread implements Runnable {
             }
         }
     }
-    private static void setRequestHeader(URLConnection con, String host, String referer) {
-        con.setRequestProperty("Accept","text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8");
+    /*
+     private static void setRequestHeader(URLConnection con, String host, String referer) {
+        con.setRequestProperty("Accept","text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*
+        /*;q=0.8");
         con.setRequestProperty("Accept-Encoding", "gzip, deflate, br");
         con.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
         con.setRequestProperty("Cache-Control", "max-age=0");
@@ -136,6 +138,7 @@ public class DownloadThread implements Runnable {
         con.setRequestProperty("Upgrade-Insecure-Requests", "1");
         con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.89 Safari/537.36");
     }
+     */
     private void reset() throws IOException {
         total = 0;
         last = System.currentTimeMillis();
