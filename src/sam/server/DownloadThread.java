@@ -37,7 +37,6 @@ public class DownloadThread implements Runnable {
     private static final HashMap<URL, Downloaded> downloaded = new HashMap<>();
 
     private boolean cancel;
-    private boolean kill;
     private double total;
     private long last = System.currentTimeMillis();
     private int lastTotal = 0;
@@ -59,7 +58,7 @@ public class DownloadThread implements Runnable {
             try {
                 task = tasks.take();
             } catch (InterruptedException e) {
-                if(kill) {
+                if(cancel) {
                     onCancel(e);
                     break;
                 }
@@ -75,22 +74,21 @@ public class DownloadThread implements Runnable {
                     InputStream is = Files.newInputStream(temp);
                     int n = 0;
                     while((n = is.read(buffer)) > 0) {
-                        if(cancel || kill)
+                        if(cancel)
                             break;
                         task.write(buffer, 0, n);
                     }
                     is.close();
-                    onComplete();
+                    if(!cancel)
+                        onComplete();
                     return;
                 }
-
                 System.out.println(yellow("downloading: ")+task.url);
 
                 URLConnection con = task.url.openConnection();
                 con.setConnectTimeout(CONNECT_TIMEOUT);
                 con.setReadTimeout(READ_TIMEOUT);
                 con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.89 Safari/537.36");
-                // setRequestHeader(con, null, null);
                 con.connect();
 
                 save_cursor();
@@ -104,7 +102,7 @@ public class DownloadThread implements Runnable {
                 int n = 0;
                 InputStream is = con.getInputStream();
                 while((n = is.read(buffer)) > 0) {
-                    if(cancel || kill)
+                    if(cancel)
                         break;
                     bytesRead += n;
                     task.write(buffer, 0, n);
@@ -112,13 +110,10 @@ public class DownloadThread implements Runnable {
                     onUpdate(bytesRead); 
                 }
                 is.close();
-                onComplete();
-                if(kill)
-                    break;
-            } catch (IOException e) {
+                if(!cancel)
+                    onComplete();
+            } catch (Exception e) {
                 onCancel(e);
-                if(kill)
-                    break;
             }
         }
     }
@@ -141,13 +136,12 @@ public class DownloadThread implements Runnable {
      */
     private void reset() throws IOException {
         total = 0;
+        cancel = false;
         last = System.currentTimeMillis();
         lastTotal = 0;
         speed = 0;
         format = null;
         temp = null;
-        cancel = false;
-        kill = false;
         if(fs != null) {
             fs.close();
             fs = null;
@@ -190,6 +184,9 @@ public class DownloadThread implements Runnable {
                 fs.close();
             }
             task.close();
+            if(cancel)
+                return;
+
             task.onComplete(temp, contentType);
 
             if(!downloaded.containsKey(task.url))
@@ -216,8 +213,8 @@ public class DownloadThread implements Runnable {
         tasks.add(task);
     }
     public void cancelAll() {
-        tasks.clear();
         cancel = true;
+        tasks.clear();
     }
 
     private static boolean saved;

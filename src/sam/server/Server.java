@@ -171,6 +171,7 @@ public class Server {
         hs.createContext("/download", new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
+                // System.out.println(exchange.getRequestURI());
                 URL url = new URL(exchange.getRequestURI().getQuery());
                 final String query = url.getQuery(); 
 
