@@ -1,12 +1,11 @@
 
-import java.io.IOException;
 import java.nio.file.Paths;
 
 import sam.server.Server;
 import sam.server.Tools;
 
 public class Main {
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws Exception {
         if(args.length == 0)
             args = new String[] {"."};
         
@@ -15,7 +14,7 @@ public class Main {
             System.exit(0);
         }
         if(args[0].equals("-v")) {
-            System.out.println(1.3);
+            System.out.println(1.4);
             System.exit(0);
         }
 

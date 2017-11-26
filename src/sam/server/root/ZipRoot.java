@@ -1,6 +1,7 @@
 package sam.server.root;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.file.Files;
@@ -132,11 +133,17 @@ public final class ZipRoot implements ServerRoot {
         try (OutputStream os = Files.newOutputStream(out, StandardOpenOption.WRITE);
                 ZipOutputStream zos = new ZipOutputStream(os);) {
 
+            byte[] bytes = new byte[256*1024];
+            
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry ze = entries.nextElement();
                 zos.putNextEntry(ze);
-                Tools.pipe(zipFile.getInputStream(ze), zos);
+                
+                InputStream is = zipFile.getInputStream(ze); 
+                int n = 0;
+                while ((n = is.read(bytes)) > 0)
+                    zos.write(bytes, 0, n);
             }
             repackMap.forEach((name, file) -> {
                 try {
