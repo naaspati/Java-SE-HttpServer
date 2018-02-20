@@ -1,10 +1,27 @@
 package sam.server;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.time.Duration;
 
 public final class Tools {
-    static boolean NO_COLOR = false; 
+    static boolean NO_COLOR = false;
     
+    public static void print(Object request, Object response) {
+        System.out.println(request + (response == null ? red("  ->  null") : yellow(" -> ") + response));
+    }
+    public static void error(Object request, Object msg, Exception e) {
+        System.out.println(request + red(" -> ") + msg + red("Error: [")+ e.getClass().getSimpleName()+"] "+e.getMessage());
+    }
+    
+    static void closeThese(Closeable...cs) {
+        for (Closeable c : cs) {
+            try {
+                if(c != null)
+                    c.close();
+            } catch (IOException e) {}
+        }
+    }
     static String durationToString(Duration duration) {
         return duration.toString().replace("PT", "").replace("M", "min ").replace("S", "sec ").replace("H", "hr ");
     }

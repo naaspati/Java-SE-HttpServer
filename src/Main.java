@@ -14,7 +14,7 @@ public class Main {
             System.exit(0);
         }
         if(args[0].equals("-v")) {
-            System.out.println(1.4);
+            System.out.println(1.451);
             System.exit(0);
         }
 

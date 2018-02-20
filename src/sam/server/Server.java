@@ -1,17 +1,11 @@
 package sam.server;
 
-import static sam.server.Tools.bytesToString;
-import static sam.server.Tools.cyan;
-import static sam.server.Tools.durationToString;
 import static sam.server.Tools.green;
-import static sam.server.Tools.red;
-import static sam.server.Tools.resave_cursor;
-import static sam.server.Tools.save_cursor;
+import static sam.server.Tools.print;
 import static sam.server.Tools.yellow;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
-import java.io.Closeable;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -21,24 +15,18 @@ import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URL;
-import java.net.URLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.time.Duration;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.ResourceBundle;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -59,39 +47,40 @@ import sam.server.root.ServerRoot;
 import sam.server.root.ZipRoot;
 
 public class Server {
-    private final URI ROOT_URI;
-    private final Path DOWNLOADS_DIR;
+    private final URI rootUri;
+    private final Path downloadsDir;
+    private final Path lookDownloadDir;
 
     private ServerRoot file;
     private final HttpServer hs;
-    private final Map<String, String> fileext_mimeMap;
+    private final Map<String, String> fileExtMimeMap;
+    private final Map<String, String> mimeFileExtMap;
     private static final Set<Path> TEMP_FILES = new HashSet<>();
-    private final Predicate<String> download_as_server_resources;
+    private final Predicate<String> downloadAsServerResourcesPredicate;
     private final InetSocketAddress runningAt;
-    private final int READ_TIMEOUT,CONNECT_TIMEOUT;
-    private final LinkedList<Future<?>> tasksList = new LinkedList<>();
-    private final ConcurrentLinkedQueue<byte[]> buffers = new ConcurrentLinkedQueue<>();
+    private final int readTimeout,connectTimeout;
+    private final ConcurrentHashMap<DownloadTask, Future<?>> tasksMap = new ConcurrentHashMap<>();
+    private final BufferManeger bufferManeger = BufferManeger.getInstance();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
-    private final ConcurrentMap<URL, Object[]> downloaded = new ConcurrentHashMap<>();
-
 
     public Server(int port) throws Exception {
         ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
         runningAt = new InetSocketAddress("localhost", port);
-        ROOT_URI = new URI("/");
+        rootUri = new URI("/");
 
-        DOWNLOADS_DIR = Optional.ofNullable(System.getProperty("server"))
+        downloadsDir = Optional.ofNullable(System.getProperty("server"))
                 .map(Paths::get)
                 .map(path -> Files.isRegularFile(path) ? path.getParent() : path)
                 .orElse(Paths.get("."))
                 .resolve("server_downloads");
+        lookDownloadDir = downloadsDir.resolveSibling("look_for_download"); 
 
-        Files.createDirectories(DOWNLOADS_DIR);
+        Files.createDirectories(downloadsDir);
 
-        READ_TIMEOUT = Integer.parseInt(rb.getString("read.timeout"));
-        CONNECT_TIMEOUT = Integer.parseInt(rb.getString("connect.timeout"));
+        readTimeout = Integer.parseInt(rb.getString("read.timeout"));
+        connectTimeout = Integer.parseInt(rb.getString("connect.timeout"));
 
-        download_as_server_resources = createPredicate(rb, "download.as.server.resources");        
+        downloadAsServerResourcesPredicate = createPredicate(rb, "download.as.server.resources");        
         final Predicate<String> download_resources = createPredicate(rb, "download.resources");
         ResourceBundle.clearCache();
 
@@ -107,19 +96,22 @@ public class Server {
                 InputStreamReader reader = new InputStreamReader(is);
                 BufferedReader br = new BufferedReader(reader)) {
 
-            fileext_mimeMap = br.lines()
+            fileExtMimeMap = br.lines()
                     .filter(s -> !s.startsWith("#") && s.indexOf('\t') > 0).map(s -> s.split("\t"))
                     .collect(Collectors.toMap(s -> s[2], s -> s[1], (o, n) -> n));
+            
+            mimeFileExtMap = new ConcurrentHashMap<>();
+            fileExtMimeMap.forEach((s,t) -> mimeFileExtMap.put(t,s));
         }
 
         hs = HttpServer.create(runningAt, 10);
-        hs.createContext(ROOT_URI.toString(), new HttpHandler() {
+        hs.createContext(rootUri.toString(), new HttpHandler() {
             @Override
             public void handle(HttpExchange exchange) throws IOException {
                 URI uri = exchange.getRequestURI();
 
-                if (uri.equals(ROOT_URI))
-                    uri = ROOT_URI.resolve("index.html");
+                if (uri.equals(rootUri))
+                    uri = rootUri.resolve("index.html");
 
                 FileUnit fileUnit = file.getFileUnit(uri);
 
@@ -144,7 +136,7 @@ public class Server {
                     exchange.getResponseHeaders().add("Content-Type", getMime(name));
 
                     // replace link which is to be cached 
-                    if (uri.equals(ROOT_URI.resolve("index.html")) || uri.toString().chars().filter(c -> c == '/').count() >= 2) {
+                    if (uri.equals(rootUri.resolve("index.html")) || uri.toString().chars().filter(c -> c == '/').count() >= 2) {
                         ByteArrayOutputStream bos = new ByteArrayOutputStream((int)fileUnit.getSize());
                         InputStream is = fileUnit.getInputStream();
                         int b = 0;
@@ -172,7 +164,6 @@ public class Server {
                 }
             }
         });
-
         // handle caching resource 
         hs.createContext("/download", new HttpHandler() {
             @Override
@@ -181,7 +172,7 @@ public class Server {
                 URL url = new URL(exchange.getRequestURI().getQuery());
                 final String query = url.getQuery(); 
 
-                FileUnit fileUnit = query != null ? file.getFileUnit(query.hashCode()) : file.getFileUnit(ROOT_URI.resolve(new File(url.getPath()).getName()));
+                FileUnit fileUnit = query != null ? file.getFileUnit(query.hashCode()) : file.getFileUnit(rootUri.resolve(new File(url.getPath()).getName()));
 
                 if (fileUnit != null) {
                     try(OutputStream resposeBody = setSendHeader(exchange, fileUnit.getSize(), getMime(fileUnit.getName()))) {
@@ -191,21 +182,42 @@ public class Server {
                     }
                 } else {
                     String name = query == null ? new File(url.getPath()).getName() : String.valueOf(query.hashCode());
-                    Path path = DOWNLOADS_DIR.resolve(name);
+                    Path path = downloadsDir.resolve(name);
                     if(Files.notExists(path))
                         downloadAction(name, url, exchange);
-                    else {
-                        try(OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name))) {
-                            Files.copy(path, resposeBody);
-                            print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
-                        } catch (Exception e) {
-                            System.out.println("failed to send file: ");
-                            print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
-                        }
-                    }
+                    else
+                        sendFile(path, exchange, name, url);
                 }
             }
         });
+    }
+
+    public boolean isServerDownloadableResource(URL url){
+        return downloadAsServerResourcesPredicate.test(url.toString());
+    }
+    public int getReadTimeout() {
+        return readTimeout;
+    }
+    public int getConnectTimeout() {
+        return connectTimeout;
+    }
+    public Path getDownloadsDir() {
+        return downloadsDir;
+    }
+    public Path getLookDownloadDir() {
+        return lookDownloadDir;
+    }
+    public String getFileExtenstionUsingMime(String mime) {
+        return mimeFileExtMap.get(mime);
+    }
+    void sendFile(Path path, HttpExchange exchange, String name, URL url) {
+        try(OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name))) {
+            Files.copy(path, resposeBody);
+            print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
+        } catch (Exception e) {
+            System.out.println("failed to send file: ");
+            print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
+        }
     }
     private Predicate<String> createPredicate(ResourceBundle rb, String resourceKey) {
         Map<Boolean, Set<String>> map = 
@@ -246,20 +258,14 @@ public class Server {
 
         URI uri2 = uri;
         dir.forEach(d -> sb.append("<li><a href='")
-                .append(uri2 + (ROOT_URI.equals(uri2) ? "" : "/")
+                .append(uri2 + (rootUri.equals(uri2) ? "" : "/")
                         + Paths.get("/" + d).toUri().toString().replaceFirst("^file:\\/+\\w+:\\/", ""))
                 .append("'>").append(d).append("</a></li>\n"));
         sb.append("   </ul>\r\n</body>\r\n\r\n</html>\r\n");
         return sb.toString().getBytes();
     }
-    protected void print(Object request, Object response) {
-        System.out.println(request + (response == null ? red("  ->  null") : yellow(" -> ") + response));
-    }
-    protected void error(Object request, Object msg, Exception e) {
-        System.out.println(request + red(" -> ") + msg + red("Error: [")+ e.getClass().getSimpleName()+"] "+e.getMessage());
-    }
 
-    private OutputStream setSendHeader(HttpExchange exchange, long size, String mime) throws IOException {
+    OutputStream setSendHeader(HttpExchange exchange, long size, String mime) throws IOException {
         exchange.getResponseHeaders().add("Content-Type", mime == null ? "text/html" : mime);
         exchange.sendResponseHeaders(200, size);
         return exchange.getResponseBody();
@@ -269,7 +275,7 @@ public class Server {
         if (index < 0)
             return "text/plain";
 
-        String mime = fileext_mimeMap.get(fileName.substring(index));
+        String mime = fileExtMimeMap.get(fileName.substring(index));
         if(mime == null) {
             try {
                 mime = Files.probeContentType(Paths.get(fileName));
@@ -293,7 +299,11 @@ public class Server {
         hs.start();
         System.out.println(yellow("server running at: \n")+
                 "    localhost:"+ runningAt.getPort()+
-                "\n    "+runningAt.getAddress().getHostAddress() + ":"+runningAt.getPort()+"\n");
+                "\n    "+runningAt.getAddress().getHostAddress() + ":"+runningAt.getPort());
+        System.out.println(downloadsDir);
+        System.out.println(lookDownloadDir);
+        System.out.println("\n");
+
         if (openInBrowser)
             Runtime.getRuntime().exec("explorer http://localhost:" + runningAt.getPort());
     }
@@ -316,142 +326,35 @@ public class Server {
     }
 
     public void closeRoot() throws IOException {
-        tasksList.forEach(f -> f.cancel(true));
-
-        if (file != null) {
-            file.close();
-            file = null;
-        }
+        tasksMap.forEach((d,f) -> f.cancel(true));
+        tasksMap.clear();
+        Tools.closeThese(file);
+        file = null;
     }
     public void pipe(InputStream is, OutputStream resposeBody) throws IOException {
-        byte[] bytes = getbuffer();
+        byte[] bytes = bufferManeger.getbuffer();
         int n = 0;
         while ((n = is.read(bytes)) > 0)
             resposeBody.write(bytes, 0, n);
 
-        addBuffer(bytes);
+        bufferManeger.addBuffer(bytes);
     }
-    private void addBuffer(byte[] buffer) {
-        if(buffer != null)
-            buffers.add(buffer);
-    }
-    private byte[] getbuffer() {
-        byte[] bytes = buffers.poll();
-        if(bytes == null)
-            return new byte[256*1024];
-        else
-            return bytes;
-    }
-    protected void downloadAction(String name, URL url, HttpExchange exchange) {
-        Object[] obj = downloaded.get(url);
-        if(obj != null && Files.exists((Path)obj[0])) {
-            try(OutputStream os = setSendHeader(exchange, Files.size((Path)obj[0]), (String)obj[1])) {
-                Files.copy((Path)obj[0], os);
-            } catch (IOException e1) {
-                System.out.println(red("Error while sending file:") +e1);
-            }
+    protected void downloadAction(final String name, final URL url, final HttpExchange exchange) {
+        Downloaded dd = DownloadTask.getDownloaded(url);
+        if(dd != null && Files.exists(dd.getDownloadPath())) {
+            sendFile(dd.getDownloadPath(), exchange, name, url);
             return;
         }
-
-        tasksList.add(executorService.submit(() -> {
-            byte[] buffer = getbuffer();
-            OutputStream ros = null, fos = null;
-            InputStream is  = null;
-
-            try {
-                save_cursor();
-                System.out.println(yellow("downloading: ")+url);
-                URLConnection con = url.openConnection();
-                con.setConnectTimeout(CONNECT_TIMEOUT);
-                con.setReadTimeout(READ_TIMEOUT);
-                con.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/62.0.3202.89 Safari/537.36");
-
-                final double total = con.getContentLength();
-                final String mime = con.getContentType();
-
-                ros = setSendHeader(exchange, (long)total, mime);
-                is = con.getInputStream();
-                Path temp  = Files.createTempFile("server-download", "");
-                fos = Files.newOutputStream(temp);
-
-                long last = System.currentTimeMillis();
-                int lastTotal = 0, speed = 0;
-
-                final String format = "%s / "+green(bytesToString(total)) + cyan(" | ") + (total < 0 ? red(" -- ") : yellow(" %.2f%%")) + cyan(" | ") + "%d Kb/sec"
-                        + (total < 0 ? "" : cyan(" | ") + yellow("time-left: ") + " %s");
-
-                int bytesRead = 0, n = 0;
-                while((n = is.read(buffer)) > 0) {
-                    fos.write(buffer, 0, n);
-                    ros.write(buffer, 0, n);
-
-                    bytesRead += n;
-
-                    long timepassed = System.currentTimeMillis() - last;
-                    if (timepassed >= 1000) {
-                        double downloaded = bytesRead - lastTotal;
-                        speed = (int) ((downloaded / timepassed) * (1000d / 1024d));
-                        lastTotal = bytesRead;
-                        last = System.currentTimeMillis();
-
-                        resave_cursor();
-                        System.out.println(yellow("downloading: ")+url);
-
-                        if (total < 0)
-                            System.out.printf(format, bytesToString(bytesRead), speed);
-                        else
-                            System.out.printf(format, bytesToString(bytesRead), (bytesRead * 100d) / total,
-                                    speed, durationToString(
-                                            Duration.ofSeconds((long) (((total - bytesRead) / 1024) / speed))));
-                    }
-                }
-
-                for (Closeable c : new Closeable[] {ros, is, fos}) {
-                    try {
-                        c.close();
-                    } catch (IOException e) {}
-                }
-
-                downloaded.put(url, new Object[] {temp, mime});
-                if(download_as_server_resources.test(url.toString())) {
-                    Files.move(temp, DOWNLOADS_DIR.resolve(name), StandardCopyOption.REPLACE_EXISTING);
-                    print(url , yellow("downloaded/"+name));    
-                    return;
-                }
-                String[] ext = {null};
-                String name2 = name;
-                if(name.matches("-?\\d+") ) {
-                    if(mime != null) {
-                        fileext_mimeMap.forEach((ext2, mime2) -> {
-                            if(ext[0] == null && Objects.equals(mime, mime2)) {
-                                ext[0] = ext2;
-                            }
-                        });
-                        name2 = name + (ext[0] == null ? "" : ext[0]);
-                    }
-                }
-                print(url, name2);
-
-                if (file instanceof ZipRoot)
-                    ((ZipRoot) file).addRepackFile(temp, name2);
-                else {
-                    DirectoryRoot dr = (DirectoryRoot) file;
-                    Files.copy(temp, dr.root.resolve(name2), StandardCopyOption.REPLACE_EXISTING);
-                }
-                addBuffer(buffer);
-                return;
-            } catch (Exception e) {
-                if(!(e instanceof InterruptedException))
-                    System.out.println(red("failed download: ")+url+"  "+e.getClass().getSimpleName()+"  "+e.getMessage());
-            }
-
-            for (Closeable c : new Closeable[] {ros, is, fos}) {
-                try {
-                    if(c != null)
-                        c.close();
-                } catch (IOException e) {}
-            }
-            addBuffer(buffer);
-        }));
+        DownloadTask dt = new DownloadTask(this, url, name, exchange, tasksMap::remove);
+        tasksMap.put(dt, executorService.submit(dt));
+    }
+    synchronized void setResourceToRootFile(Path temp, String name2) throws IOException {
+        if (file instanceof ZipRoot)
+            ((ZipRoot) file).addRepackFile(temp, name2);
+        else {
+            DirectoryRoot dr = (DirectoryRoot) file;
+            Files.copy(temp, dr.root.resolve(name2), StandardCopyOption.REPLACE_EXISTING);
+        }
+        TEMP_FILES.add(temp);
     }
 }
