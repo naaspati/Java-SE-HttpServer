@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 public interface ServerRoot extends AutoCloseable, Closeable {
+    
     FileUnit getFileUnit(URI uri) throws IOException;
     FileUnit getFileUnit(long hashcode) throws IOException;
     List<String> walkDirectory(URI uri);

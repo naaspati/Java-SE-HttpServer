@@ -20,7 +20,7 @@ import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
-import sam.server.Tools;
+import sam.server.Utils;
 
 public final class ZipRoot implements ServerRoot {
     private ZipFile zipFile;
@@ -84,9 +84,8 @@ public final class ZipRoot implements ServerRoot {
         file = null;
         map = null;
         repackMap = null;
-        if(zipFile != null) {
+        if(zipFile != null) 
             zipFile.close();
-        }
         zipFile = null;
     }
 
@@ -150,7 +149,7 @@ public final class ZipRoot implements ServerRoot {
                     zos.putNextEntry(new ZipEntry(name.toString()));
                     Files.copy(file, zos);  
                 } catch (IOException e) {
-                    System.out.println(Tools.red("failed repack: ")+file+"  "+e);
+                    System.out.println(Utils.red("failed repack: ")+file+"  "+e);
                 }
             });
         }
@@ -158,7 +157,7 @@ public final class ZipRoot implements ServerRoot {
         zipFile = null;
 
         Files.move(out, file, StandardCopyOption.REPLACE_EXISTING);
-        System.out.println(Tools.yellow("repacked: ") + file.getFileName() + Tools.yellow("  added: ") + repackMap.keySet());
+        System.out.println(Utils.yellow("repacked: ") + file.getFileName() + Utils.yellow("  added: ") + repackMap.keySet());
     }
 
 }

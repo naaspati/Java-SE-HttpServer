@@ -1,16 +1,19 @@
 package sam.server;
 
-import static sam.server.Tools.green;
-import static sam.server.Tools.print;
-import static sam.server.Tools.yellow;
+import static sam.server.ServerUtils.DOWNLOADS_DIR;
+import static sam.server.ServerUtils.LOOK_DOWNLOADS_DIR;
+import static sam.server.ServerUtils.getMime;
+import static sam.server.ServerUtils.pipe;
+import static sam.server.ServerUtils.setSendHeader;
+import static sam.server.Utils.green;
+import static sam.server.Utils.print;
+import static sam.server.Utils.yellow;
 
-import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -19,198 +22,188 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
 import java.util.ResourceBundle;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.function.Function;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 
+import sam.console.ansi.ANSI;
+import sam.server.DownloadTask.DownloadResult;
 import sam.server.root.DirectoryRoot;
 import sam.server.root.FileUnit;
 import sam.server.root.ServerRoot;
 import sam.server.root.ZipRoot;
 
-public class Server {
+public class Server extends ThreadPoolExecutor implements AutoCloseable {
     private final URI rootUri;
-    private final Path downloadsDir;
-    private final Path lookDownloadDir;
 
-    private ServerRoot file;
+    final Predicate<String> downloadResourcesTester;
+
+    private volatile AtomicBoolean canceller;
+    private volatile ServerRoot file;
     private final HttpServer hs;
-    private final Map<String, String> fileExtMimeMap;
-    private final Map<String, String> mimeFileExtMap;
-    private static final Set<Path> TEMP_FILES = new HashSet<>();
+    private Thread shutDownHook = ServerUtils.addShutdownHook(this); 
+
     private final Predicate<String> downloadAsServerResourcesPredicate;
     private final InetSocketAddress runningAt;
-    private final int readTimeout,connectTimeout;
-    private final ConcurrentHashMap<DownloadTask, Future<?>> tasksMap = new ConcurrentHashMap<>();
-    private final BufferManeger bufferManeger = BufferManeger.getInstance();
-    private final ExecutorService executorService = Executors.newCachedThreadPool();
+    
+        protected void afterExecute(Runnable r, Throwable t) {
+            super.afterExecute(r, t);
 
+            if(r == null)
+                return;
+
+            @SuppressWarnings("unchecked")
+            Future<DownloadResult> f = (Future<DownloadResult>)r;
+            DownloadResult d = null;
+            try {
+                d = f.get();
+            } catch (InterruptedException | ExecutionException e) {
+                e.printStackTrace();
+            }
+
+            if(d == null)
+                return;
+
+            synchronized (file) {
+                if(file == null)
+                    return;
+                
+                Path path = d.getPath();
+                String name = d.getName(); 
+
+                if (file instanceof ZipRoot)
+                    ((ZipRoot) file).addRepackFile(path, name);
+                else {
+                    DirectoryRoot dr = (DirectoryRoot) file;
+                    try {
+                        Files.copy(path, dr.root.resolve(name), StandardCopyOption.REPLACE_EXISTING);
+                    } catch (IOException e) {
+                        System.out.println("failed to copy: "+path+" -> "+dr.root.resolve(name)+"  error: "+e);
+                    }
+                }
+            }
+        }
+        
     public Server(int port) throws Exception {
-        ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
+        super(0, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS, new SynchronousQueue<Runnable>());
+        
         runningAt = new InetSocketAddress("localhost", port);
         rootUri = new URI("/");
+        
+        ResourceBundle rb = ResourceBundle.getBundle("1509617391333-server_config");
+        
+        downloadAsServerResourcesPredicate = new Tester(rb.getString("download.as.server.resources"));        
+        downloadResourcesTester = new Tester(rb.getString("download.resources"));
 
-        downloadsDir = Optional.ofNullable(System.getProperty("server"))
-                .map(Paths::get)
-                .map(path -> Files.isRegularFile(path) ? path.getParent() : path)
-                .orElse(Paths.get("."))
-                .resolve("server_downloads");
-        lookDownloadDir = downloadsDir.resolveSibling("look_for_download"); 
-
-        Files.createDirectories(downloadsDir);
-
-        readTimeout = Integer.parseInt(rb.getString("read.timeout"));
-        connectTimeout = Integer.parseInt(rb.getString("connect.timeout"));
-
-        downloadAsServerResourcesPredicate = createPredicate(rb, "download.as.server.resources");        
-        final Predicate<String> download_resources = createPredicate(rb, "download.resources");
         ResourceBundle.clearCache();
-
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            executorService.shutdownNow();
-            try {
-                closeRoot();
-                TEMP_FILES.stream().map(Path::toFile).forEach(File::delete);
-            } catch (IOException e) {}   
-        }));
-
-        try(InputStream is = getClass().getClassLoader().getResourceAsStream("1509617391333-file.ext-mime.tsv");
-                InputStreamReader reader = new InputStreamReader(is);
-                BufferedReader br = new BufferedReader(reader)) {
-
-            fileExtMimeMap = br.lines()
-                    .filter(s -> !s.startsWith("#") && s.indexOf('\t') > 0).map(s -> s.split("\t"))
-                    .collect(Collectors.toMap(s -> s[2], s -> s[1], (o, n) -> n));
-            
-            mimeFileExtMap = new ConcurrentHashMap<>();
-            fileExtMimeMap.forEach((s,t) -> mimeFileExtMap.put(t,s));
-        }
-
         hs = HttpServer.create(runningAt, 10);
-        hs.createContext(rootUri.toString(), new HttpHandler() {
-            @Override
-            public void handle(HttpExchange exchange) throws IOException {
-                URI uri = exchange.getRequestURI();
 
-                if (uri.equals(rootUri))
-                    uri = rootUri.resolve("index.html");
-
-                FileUnit fileUnit = file.getFileUnit(uri);
-
-                if (fileUnit == null) {
-                    uri = exchange.getRequestURI();
-
-                    List<String> dir = file.walkDirectory(uri);
-                    if (dir != null) {
-                        final byte[] bytes = directoryHtml(uri, dir);
-                        try(OutputStream resposeBody = setSendHeader(exchange, bytes.length, "text/html")) {
-                            resposeBody.write(bytes);    
-                        }
-                    } else {
-                        print(uri, null);
-                        exchange.sendResponseHeaders(404, -1);
-                    }
-                    return;
-                }
-                String name = fileUnit.getName();
-                print(uri,name);
-                try(OutputStream resposeBody = exchange.getResponseBody()) {
-                    exchange.getResponseHeaders().add("Content-Type", getMime(name));
-
-                    // replace link which is to be cached 
-                    if (uri.equals(rootUri.resolve("index.html")) || uri.toString().chars().filter(c -> c == '/').count() >= 2) {
-                        ByteArrayOutputStream bos = new ByteArrayOutputStream((int)fileUnit.getSize());
-                        InputStream is = fileUnit.getInputStream();
-                        int b = 0;
-                        while((b = is.read()) != -1) bos.write(b);
-
-                        Pattern pattern = Pattern.compile("(\"|')(https?.+)\\1");
-                        Matcher m = pattern.matcher(new String(bos.toByteArray()));
-
-                        StringBuffer sb = new StringBuffer();
-
-                        while(m.find()) {
-                            if(download_resources.test(m.group(2)))
-                                m.appendReplacement(sb, m.group(1)+"/download?"+m.group(2)+m.group(1));
-                        } 
-                        m.appendTail(sb);
-
-                        byte[] bytes = sb.toString().getBytes();
-                        exchange.sendResponseHeaders(200, bytes.length);
-                        resposeBody.write(bytes);
-                    } else {
-                        exchange.sendResponseHeaders(200, fileUnit.getSize());
-                        pipe(fileUnit.getInputStream(), resposeBody);
-                    }
-                    fileUnit.close();
-                }
-            }
-        });
+        hs.createContext(rootUri.toString(), new SimpleHandler());
         // handle caching resource 
-        hs.createContext("/download", new HttpHandler() {
-            @Override
-            public void handle(HttpExchange exchange) throws IOException {
-                // System.out.println(exchange.getRequestURI());
-                URL url = new URL(exchange.getRequestURI().getQuery());
-                final String query = url.getQuery(); 
+        hs.createContext("/download", new DownloadHandler());
+    }
 
-                FileUnit fileUnit = query != null ? file.getFileUnit(query.hashCode()) : file.getFileUnit(rootUri.resolve(new File(url.getPath()).getName()));
+    private class DownloadHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            URL url = new URL(exchange.getRequestURI().getQuery());
+            final String query = url.getQuery(); 
 
-                if (fileUnit != null) {
-                    try(OutputStream resposeBody = setSendHeader(exchange, fileUnit.getSize(), getMime(fileUnit.getName()))) {
-                        pipe(fileUnit.getInputStream(), resposeBody);
-                        print(url, fileUnit.getName());
-                        fileUnit.close();                        
+            FileUnit fileUnit = query != null ? file.getFileUnit(query.hashCode()) : file.getFileUnit(rootUri.resolve(new File(url.getPath()).getName()));
+
+            if (fileUnit != null) {
+                try(OutputStream resposeBody = setSendHeader(exchange, fileUnit.getSize(), getMime(fileUnit.getName()))) {
+                    pipe(fileUnit.getInputStream(), resposeBody);
+                    print(url, fileUnit.getName());
+                    fileUnit.close();                        
+                }
+            } else {
+                String name = query == null ? new File(url.getPath()).getName() : String.valueOf(query.hashCode());
+                Path path = DOWNLOADS_DIR.resolve(name);
+                if(Files.notExists(path))
+                    downloadAction(name, url, exchange);
+                else
+                    sendFile(path, exchange, name, url);
+            }
+        }
+    }
+
+    private class SimpleHandler implements HttpHandler {
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            URI uri = exchange.getRequestURI();
+
+            if (uri.equals(rootUri))
+                uri = rootUri.resolve("index.html");
+
+            FileUnit fileUnit = file.getFileUnit(uri);
+
+            if (fileUnit == null) {
+                uri = exchange.getRequestURI();
+
+                List<String> dir = file.walkDirectory(uri);
+                if (dir != null) {
+                    final byte[] bytes = directoryHtml(uri, dir);
+                    try(OutputStream resposeBody = setSendHeader(exchange, bytes.length, "text/html")) {
+                        resposeBody.write(bytes);    
                     }
                 } else {
-                    String name = query == null ? new File(url.getPath()).getName() : String.valueOf(query.hashCode());
-                    Path path = downloadsDir.resolve(name);
-                    if(Files.notExists(path))
-                        downloadAction(name, url, exchange);
-                    else
-                        sendFile(path, exchange, name, url);
+                    print(uri, null);
+                    exchange.sendResponseHeaders(404, -1);
                 }
+                return;
             }
-        });
+            String name = fileUnit.getName();
+            print(uri,name);
+            try(OutputStream resposeBody = exchange.getResponseBody()) {
+                exchange.getResponseHeaders().add("Content-Type", getMime(name));
+
+                // replace link which is to be cached 
+                if (uri.equals(rootUri.resolve("index.html")) || uri.toString().chars().filter(c -> c == '/').count() >= 2) {
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream((int)fileUnit.getSize());
+                    InputStream is = fileUnit.getInputStream();
+                    int b = 0;
+                    while((b = is.read()) != -1) bos.write(b);
+
+                    Pattern pattern = Pattern.compile("(\"|')(https?.+)\\1");
+                    Matcher m = pattern.matcher(new String(bos.toByteArray()));
+
+                    StringBuffer sb = new StringBuffer();
+
+                    while(m.find()) {
+                        if(downloadResourcesTester.test(m.group(2)))
+                            m.appendReplacement(sb, m.group(1)+"/download?"+m.group(2)+m.group(1));
+                    } 
+                    m.appendTail(sb);
+
+                    byte[] bytes = sb.toString().getBytes();
+                    exchange.sendResponseHeaders(200, bytes.length);
+                    resposeBody.write(bytes);
+                } else {
+                    exchange.sendResponseHeaders(200, fileUnit.getSize());
+                    pipe(fileUnit.getInputStream(), resposeBody);
+                }
+                fileUnit.close();
+            }
+        }
     }
 
     public boolean isServerDownloadableResource(URL url){
         return downloadAsServerResourcesPredicate.test(url.toString());
     }
-    public int getReadTimeout() {
-        return readTimeout;
-    }
-    public int getConnectTimeout() {
-        return connectTimeout;
-    }
-    public Path getDownloadsDir() {
-        return downloadsDir;
-    }
-    public Path getLookDownloadDir() {
-        return lookDownloadDir;
-    }
-    public String getFileExtenstionUsingMime(String mime) {
-        return mimeFileExtMap.get(mime);
-    }
-    void sendFile(Path path, HttpExchange exchange, String name, URL url) {
+    static void sendFile(Path path, HttpExchange exchange, String name, URL url) {
         try(OutputStream resposeBody = setSendHeader(exchange, Files.size(path), getMime(name))) {
             Files.copy(path, resposeBody);
             print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
@@ -219,37 +212,7 @@ public class Server {
             print(url , path.subpath(path.getNameCount() - 2, path.getNameCount()));
         }
     }
-    private Predicate<String> createPredicate(ResourceBundle rb, String resourceKey) {
-        Map<Boolean, Set<String>> map = 
-                Optional.ofNullable(rb.getString(resourceKey))
-                .map(s -> s.trim().isEmpty() ? null : s)
-                .map(s -> s.split("\\s*,\\s*"))
-                .map(ary -> Stream.of(ary)
-                        .map(String::trim)
-                        .filter(s -> !s.isEmpty())
-                        .map(s -> s.replace(".", "\\.").replace("*", ".+"))
-                        .collect(Collectors.partitioningBy(s -> s.charAt(0) != '!', Collectors.toSet()))
-                        )
-                .orElse(new HashMap<>());
 
-        Function<Boolean , Predicate<String>> get = key -> {
-            if(map.get(key) == null || map.get(key).isEmpty())
-                return null; 
-
-            return map.get(key)
-                    .stream()
-                    .map(s -> key ? s : s.substring(1))
-                    .map(Pattern::compile)
-                    .map(pattern -> (Predicate<String>)(s -> pattern.matcher(s).matches()))
-                    .reduce(Predicate::or)
-                    .get();        
-        };
-
-        Predicate<String> add = get.apply(true);
-        Predicate<String> remove = get.apply(false);
-
-        return string -> remove != null && remove.test(string) ? false : add == null ? false : add.test(string);    
-    }; 
     protected byte[] directoryHtml(URI uri, List<String> dir) {
         StringBuilder sb = new StringBuilder(
                 "<!DOCTYPE html>\r\n<html>\r\n\r\n<head>\r\n    <meta charset=\"utf-8\">\r\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1, shrink-to-fit=no\">\r\n    <title>")
@@ -265,59 +228,41 @@ public class Server {
         return sb.toString().getBytes();
     }
 
-    OutputStream setSendHeader(HttpExchange exchange, long size, String mime) throws IOException {
-        exchange.getResponseHeaders().add("Content-Type", mime == null ? "text/html" : mime);
-        exchange.sendResponseHeaders(200, size);
-        return exchange.getResponseBody();
-    }
-    private String getMime(String fileName) {
-        final int index = fileName.lastIndexOf('.');
-        if (index < 0)
-            return "text/plain";
-
-        String mime = fileExtMimeMap.get(fileName.substring(index));
-        if(mime == null) {
-            try {
-                mime = Files.probeContentType(Paths.get(fileName));
-            } catch (IOException e) {}
-        }
-
-        return mime == null ? "text/plain" : mime;
-    }
-
     public void start(Path root, boolean openInBrowser) throws IOException {
-        closeRoot();
-
-        if (Files.notExists(root))
-            throw new FileNotFoundException(root.toString());
-
-        if (Files.isRegularFile(root))
-            file = new ZipRoot(root);
-        else
-            file = new DirectoryRoot(root);
-
+        createNewServerRoot(root);
         hs.start();
         System.out.println(yellow("server running at: \n")+
                 "    localhost:"+ runningAt.getPort()+
                 "\n    "+runningAt.getAddress().getHostAddress() + ":"+runningAt.getPort());
-        System.out.println(downloadsDir);
-        System.out.println(lookDownloadDir);
+        System.out.println(ANSI.yellow("DOWNLOADS_DIR\n")+DOWNLOADS_DIR.toUri());
+        System.out.println(ANSI.yellow("LOOK_DOWNLOADS_DIR\n")+LOOK_DOWNLOADS_DIR.toUri());
         System.out.println("\n");
 
         if (openInBrowser)
             Runtime.getRuntime().exec("explorer http://localhost:" + runningAt.getPort());
     }
 
-    public void changeRoot(Path path, boolean openInBrowser) throws IOException {
-        if (Files.notExists(path))
-            throw new FileNotFoundException(path.toString());
+    private void createNewServerRoot(Path root) throws IOException {
+        if (Files.notExists(root))
+            throw new FileNotFoundException(root.toString());
 
         closeRoot();
+        file = Files.isRegularFile(root) ? new ZipRoot(root) : new DirectoryRoot(root);
+        canceller = new AtomicBoolean(false);
+    }
+    public void closeRoot() throws IOException {
+        if(file != null) {
+            canceller.set(true);
+            file.close();
+            getQueue().stream().filter(r -> r instanceof Future).map(Future.class::cast).forEach(f -> f.cancel(true));
+            getQueue().clear();
+            file = null;
+            canceller = null;
+        }
+    }
 
-        if (Files.isRegularFile(path))
-            file = new ZipRoot(path);
-        else
-            file = new DirectoryRoot(path);
+    public void changeRoot(Path path, boolean openInBrowser) throws IOException {
+        createNewServerRoot(path);
 
         if (openInBrowser)
             Runtime.getRuntime().exec("explorer http://localhost:"+runningAt.getPort());
@@ -325,36 +270,19 @@ public class Server {
         System.out.println(green("\nroot changed to:  "+file.getRoot()));
     }
 
-    public void closeRoot() throws IOException {
-        tasksMap.forEach((d,f) -> f.cancel(true));
-        tasksMap.clear();
-        Tools.closeThese(file);
-        file = null;
-    }
-    public void pipe(InputStream is, OutputStream resposeBody) throws IOException {
-        byte[] bytes = bufferManeger.getbuffer();
-        int n = 0;
-        while ((n = is.read(bytes)) > 0)
-            resposeBody.write(bytes, 0, n);
-
-        bufferManeger.addBuffer(bytes);
-    }
     protected void downloadAction(final String name, final URL url, final HttpExchange exchange) {
         Downloaded dd = DownloadTask.getDownloaded(url);
         if(dd != null && Files.exists(dd.getDownloadPath())) {
             sendFile(dd.getDownloadPath(), exchange, name, url);
             return;
         }
-        DownloadTask dt = new DownloadTask(this, url, name, exchange, tasksMap::remove);
-        tasksMap.put(dt, executorService.submit(dt));
+        
+        submit(new DownloadTask(canceller, url, name, exchange, isServerDownloadableResource(url)));
     }
-    synchronized void setResourceToRootFile(Path temp, String name2) throws IOException {
-        if (file instanceof ZipRoot)
-            ((ZipRoot) file).addRepackFile(temp, name2);
-        else {
-            DirectoryRoot dr = (DirectoryRoot) file;
-            Files.copy(temp, dr.root.resolve(name2), StandardCopyOption.REPLACE_EXISTING);
-        }
-        TEMP_FILES.add(temp);
+
+    @Override
+    public void close() throws Exception {
+        Runtime.getRuntime().removeShutdownHook(shutDownHook);
+        shutDownHook.start();
     }
 }

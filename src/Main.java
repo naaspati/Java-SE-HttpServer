@@ -2,7 +2,7 @@
 import java.nio.file.Paths;
 
 import sam.server.Server;
-import sam.server.Tools;
+import sam.server.Utils;
 
 public class Main {
     public static void main(String[] args) throws Exception {
@@ -14,12 +14,13 @@ public class Main {
             System.exit(0);
         }
         if(args[0].equals("-v")) {
-            System.out.println(1.451);
+            System.out.println(1.453);
             System.exit(0);
         }
 
         Server s = new Server(8080);
         s.start(Paths.get(args[0]), true);//args.length > 1 ? "--open".equals(args[1]) : false);
+        
     }
 
     private static void printUsage() {
@@ -32,6 +33,6 @@ public class Main {
                  */
                  ;
 
-        System.out.println(Tools.yellow(usage));
+        System.out.println(Utils.yellow(usage));
     }
 }
